@@ -16,9 +16,10 @@ set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-VISION_DIR="${GPU_VISION_DIR:-$HOME/ai-studio/vision}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VISION_DIR="${GPU_VISION_DIR:-$SCRIPT_DIR}"
 VENV_DIR="${GPU_VENV:-$VISION_DIR/.venv}"
-WORK_DIR="${GPU_WORK_DIR:-$HOME/ai-studio/reference/3d_output}"
+WORK_DIR="${GPU_WORK_DIR:-$VISION_DIR/output}"
 MODELS_DIR="${GPU_MODELS_DIR:-$VISION_DIR/hf_models}"
 PORT=8000
 CADDY_PORT=9443

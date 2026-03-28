@@ -21,9 +21,10 @@ Usage:
     .venv/bin/python server.py --host 127.0.0.1 --port 8000
 
 Environment:
-    GPU_API_KEY       — required API key for authentication
-    GPU_MODELS_DIR    — Model weights (default: ~/ai-studio/vision/hf_models)
-    GPU_WORK_DIR      — working directory for outputs (default: ~/ai-studio/reference/3d_output)
+    GPU_API_KEY       — API key for authentication (empty = open access)
+    GPU_MODELS_DIR    — Model weights (default: ./hf_models)
+    GPU_WORK_DIR      — working directory for outputs (default: ./output)
+    GPU_VISION_DIR    — Vision3D installation directory (default: .)
 """
 
 import asyncio
@@ -172,11 +173,15 @@ def _get_paint_pipeline():
 def _run_shape_from_image(
     image_path: str, output_dir: str, job_id: str,
     target_faces: int = 0,
+    octree_resolution: int = 384,
+    num_inference_steps: int = 30,
 ) -> dict:
     """Image → 3D shape generation (blocking, runs in thread).
 
     Args:
         target_faces: if > 0, decimate the mesh to this face count after generation.
+        octree_resolution: marching cubes grid resolution (higher = more detail).
+        num_inference_steps: denoising steps (higher = better quality, slower).
     """
     import torch
     from PIL import Image
@@ -202,8 +207,12 @@ def _run_shape_from_image(
         except ImportError:
             pass
 
-    _job_log(job_id, "[3/5] Generating 3D shape (~3-8 min)...")
-    result = pipeline(image=image)
+    _job_log(job_id, f"[3/5] Generating 3D shape (octree={octree_resolution}, steps={num_inference_steps})...")
+    result = pipeline(
+        image=image,
+        octree_resolution=octree_resolution,
+        num_inference_steps=num_inference_steps,
+    )
     mesh = result[0]
     _job_log(
         job_id,
@@ -235,6 +244,8 @@ def _run_shape_from_image(
 def _run_shape_from_text(
     text_prompt: str, output_dir: str, job_id: str,
     target_faces: int = 0,
+    octree_resolution: int = 384,
+    num_inference_steps: int = 30,
 ) -> dict:
     """Text → 3D shape generation (blocking, runs in thread)."""
     import torch
@@ -245,8 +256,12 @@ def _run_shape_from_text(
     _job_log(job_id, "[1/4] Loading shape pipeline...")
     pipeline = _get_shape_pipeline()
 
-    _job_log(job_id, f"[2/4] Generating from text: '{text_prompt}' (~3-8 min)...")
-    result = pipeline(text=text_prompt)
+    _job_log(job_id, f"[2/4] Generating from text: '{text_prompt}' (octree={octree_resolution}, steps={num_inference_steps})...")
+    result = pipeline(
+        text=text_prompt,
+        octree_resolution=octree_resolution,
+        num_inference_steps=num_inference_steps,
+    )
     mesh = result[0]
     _job_log(
         job_id,
@@ -277,18 +292,42 @@ def _run_shape_from_text(
 # ── Quality presets ──────────────────────────────────────────────────────────
 
 QUALITY_PRESETS = {
-    "low":    {"target_faces": 10000,  "label": "Low (10k faces — mobile/web)"},
-    "medium": {"target_faces": 50000,  "label": "Medium (50k faces — general use)"},
-    "high":   {"target_faces": 150000, "label": "High (150k faces — detailed models)"},
-    "ultra":  {"target_faces": 0,      "label": "Ultra (no decimation — max detail)"},
+    "low": {
+        "target_faces": 10000,
+        "octree_resolution": 256,
+        "num_inference_steps": 20,
+        "label": "Low (10k faces — mobile/web, fast)",
+    },
+    "medium": {
+        "target_faces": 50000,
+        "octree_resolution": 384,
+        "num_inference_steps": 30,
+        "label": "Medium (50k faces — general use)",
+    },
+    "high": {
+        "target_faces": 150000,
+        "octree_resolution": 384,
+        "num_inference_steps": 50,
+        "label": "High (150k faces — detailed models)",
+    },
+    "ultra": {
+        "target_faces": 0,
+        "octree_resolution": 512,
+        "num_inference_steps": 50,
+        "label": "Ultra (no decimation — max detail)",
+    },
 }
 
 
-def _resolve_target_faces(target_faces: int, preset: str) -> int:
-    """Resolve target faces from explicit value or preset name."""
+def _resolve_preset(target_faces: int, preset: str) -> dict:
+    """Resolve generation parameters from preset name or fall back to defaults."""
     if preset and preset in QUALITY_PRESETS:
-        return QUALITY_PRESETS[preset]["target_faces"]
-    return target_faces
+        return QUALITY_PRESETS[preset].copy()
+    return {
+        "target_faces": target_faces,
+        "octree_resolution": 384,
+        "num_inference_steps": 30,
+    }
 
 
 def _compute_vertex_curvature(mesh, job_id: str):
@@ -538,6 +577,8 @@ def _run_texture(
 def _run_full_pipeline(
     image_path: str, output_dir: str, job_id: str,
     target_faces: int = 50000,
+    octree_resolution: int = 384,
+    num_inference_steps: int = 30,
 ) -> dict:
     """Full pipeline: image → shape → decimate → texture (blocking, runs in thread)."""
     import torch
@@ -550,7 +591,7 @@ def _run_full_pipeline(
 
     # ── Phase 1: Shape generation ──────────────────────────────────
     _job_log(job_id, "═══ PHASE 1/2: SHAPE GENERATION ═══")
-    _job_log(job_id, "[1/6] Loading shape pipeline...")
+    _job_log(job_id, f"[1/6] Loading shape pipeline...")
     pipeline = _get_shape_pipeline()
 
     _job_log(job_id, f"[2/6] Loading image: {image_path}")
@@ -565,22 +606,30 @@ def _run_full_pipeline(
         except ImportError:
             pass
 
-    _job_log(job_id, "[3/6] Generating 3D shape (~3-8 min)...")
-    result = pipeline(image=image)
+    _job_log(job_id, f"[3/6] Generating 3D shape (octree={octree_resolution}, steps={num_inference_steps})...")
+    result = pipeline(
+        image=image,
+        octree_resolution=octree_resolution,
+        num_inference_steps=num_inference_steps,
+    )
     mesh = result[0]
     orig_faces = len(mesh.faces)
     _job_log(job_id, f"      Generated: {len(mesh.vertices):,} verts | {orig_faces:,} faces")
 
-    # Decimation
+    # Decimation — keep the in-memory mesh for painting (avoids lossy GLB roundtrip)
     if target_faces > 0 and orig_faces > target_faces:
         _job_log(job_id, f"[3.5/6] Decimating: {orig_faces:,} → {target_faces:,} faces...")
         tri_mesh = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
         tri_mesh = _decimate_mesh(tri_mesh, target_faces, job_id)
         glb_path = output / "mesh.glb"
         tri_mesh.export(str(glb_path))
+        paint_mesh = tri_mesh  # pass directly to paint pipeline
     else:
+        # No decimation — convert to trimesh in memory, export for download
+        tri_mesh = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
         glb_path = output / "mesh.glb"
-        mesh.export(str(glb_path))
+        tri_mesh.export(str(glb_path))
+        paint_mesh = tri_mesh
 
     mesh_size_kb = glb_path.stat().st_size // 1024
     _job_log(job_id, f"      Shape saved: mesh.glb ({mesh_size_kb} KB)")
@@ -592,14 +641,9 @@ def _run_full_pipeline(
     _job_log(job_id, "[4/6] Loading paint pipeline...")
     paint = _get_paint_pipeline()
 
-    _job_log(job_id, "[5/6] Loading mesh for texturing...")
-    tex_mesh = trimesh.load(str(glb_path), force="mesh")
-    if isinstance(tex_mesh, trimesh.Scene):
-        tex_mesh = tex_mesh.dump(concatenate=True)
-
     ref_image = Image.open(image_path)
     _job_log(job_id, "[5/6] Painting texture (~2-5 min)...")
-    textured = paint(tex_mesh, ref_image)
+    textured = paint(paint_mesh, ref_image)
 
     _job_log(job_id, "[6/6] Saving textured results...")
     files = []
@@ -709,8 +753,8 @@ async def generate_shape(
     """
     _verify_api_key(x_api_key)
 
-    target_faces = _resolve_target_faces(target_faces, preset)
-    job_id = _new_job("shape-image", f"subdir={output_subdir}, target_faces={target_faces}")
+    params = _resolve_preset(target_faces, preset)
+    job_id = _new_job("shape-image", f"subdir={output_subdir}, target_faces={params['target_faces']}")
     out_dir = WORK_DIR / output_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -721,7 +765,10 @@ async def generate_shape(
 
     # Launch inference in background
     asyncio.create_task(
-        _run_in_background(job_id, _run_shape_from_image, str(image_path), str(out_dir), job_id, target_faces)
+        _run_in_background(
+            job_id, _run_shape_from_image, str(image_path), str(out_dir), job_id,
+            params["target_faces"], params["octree_resolution"], params["num_inference_steps"],
+        )
     )
 
     return {"job_id": job_id, "status": "running", "poll": f"/api/jobs/{job_id}"}
@@ -857,8 +904,8 @@ async def generate_full(
     """
     _verify_api_key(x_api_key)
 
-    resolved_faces = _resolve_target_faces(target_faces, preset)
-    preset_label = preset or f"{resolved_faces} faces"
+    params = _resolve_preset(target_faces, preset)
+    preset_label = preset or f"{params['target_faces']} faces"
     job_id = _new_job("full-pipeline", f"subdir={output_subdir}, quality={preset_label}")
     out_dir = WORK_DIR / output_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -868,7 +915,10 @@ async def generate_full(
     image_path.write_bytes(content)
 
     asyncio.create_task(
-        _run_in_background(job_id, _run_full_pipeline, str(image_path), str(out_dir), job_id, resolved_faces)
+        _run_in_background(
+            job_id, _run_full_pipeline, str(image_path), str(out_dir), job_id,
+            params["target_faces"], params["octree_resolution"], params["num_inference_steps"],
+        )
     )
 
     return {
@@ -1011,10 +1061,10 @@ _WEB_UI_HTML = """<!DOCTYPE html>
           <div>
             <label for="preset">Quality preset</label>
             <select id="preset" onchange="onPresetChange()">
-              <option value="low">Low — 10k faces (mobile/web)</option>
-              <option value="medium" selected>Medium — 50k faces (general use)</option>
-              <option value="high">High — 150k faces (detailed models)</option>
-              <option value="ultra">Ultra — no decimation (max detail)</option>
+              <option value="low">Low — 10k faces, fast (octree 256, 20 steps)</option>
+              <option value="medium" selected>Medium — 50k faces (octree 384, 30 steps)</option>
+              <option value="high">High — 150k faces (octree 384, 50 steps)</option>
+              <option value="ultra">Ultra — max detail (octree 512, 50 steps, no decimation)</option>
               <option value="custom">Custom...</option>
             </select>
           </div>
@@ -1036,10 +1086,10 @@ _WEB_UI_HTML = """<!DOCTYPE html>
           <div>
             <label for="preset_shape">Quality preset</label>
             <select id="preset_shape">
-              <option value="low">Low — 10k faces</option>
+              <option value="low">Low — 10k faces (fast)</option>
               <option value="medium" selected>Medium — 50k faces</option>
-              <option value="high">High — 150k faces</option>
-              <option value="ultra">Ultra — no decimation</option>
+              <option value="high">High — 150k faces (detailed)</option>
+              <option value="ultra">Ultra — max detail</option>
             </select>
           </div>
           <div>

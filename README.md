@@ -22,18 +22,32 @@ Built on [Hunyuan3D-2](https://github.com/Tencent/Hunyuan3D-2) by Tencent, expos
 
 ## Quick Start
 
-### 1. Install Hunyuan3D-2 (prerequisite)
-
-Vision3D uses Hunyuan3D-2 for inference. Install it first on your GPU machine:
+### 1. Clone Vision3D
 
 ```bash
-git clone https://github.com/Tencent/Hunyuan3D-2.git
-cd Hunyuan3D-2
-python3 -m venv .venv
-.venv/bin/pip install -e .
+git clone https://github.com/abrahamADSK/vision3d.git
+cd vision3d
 ```
 
-Download the model weights (~10 GB):
+### 2. Install Hunyuan3D-2 (prerequisite)
+
+Vision3D uses Hunyuan3D-2 for inference. Clone it inside the vision3d directory and create a shared venv:
+
+```bash
+python3 -m venv .venv
+git clone https://github.com/Tencent/Hunyuan3D-2.git
+.venv/bin/pip install -e Hunyuan3D-2/
+```
+
+### 3. Compile custom_rasterizer (required for texturing)
+
+The paint pipeline depends on a C++ extension that must be compiled from source:
+
+```bash
+.venv/bin/pip install ./Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer
+```
+
+### 4. Download model weights (~10 GB)
 
 ```bash
 .venv/bin/python -c "
@@ -43,38 +57,29 @@ snapshot_download('tencent/Hunyuan3D-2', allow_patterns='hunyuan3d-paint-v2-0-tu
 "
 ```
 
-Move or symlink the weights to your models directory (default: `~/ai-studio/vision/hf_models`), or set `GPU_MODELS_DIR` to where they were downloaded.
+Move or symlink the downloaded weights into `hf_models/` inside the vision3d directory, or set `GPU_MODELS_DIR` to point at wherever they were downloaded.
 
-### 2. Clone Vision3D
-
-```bash
-git clone https://github.com/abrahamADSK/vision3d.git
-cd vision3d
-```
-
-### 3. Install Vision3D dependencies
-
-Into the Hunyuan3D-2 venv:
+### 5. Install Vision3D dependencies
 
 ```bash
-/path/to/Hunyuan3D-2/.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements.txt
 ```
 
 For better polygon decimation (recommended):
 
 ```bash
-/path/to/Hunyuan3D-2/.venv/bin/pip install pyfqmr
+.venv/bin/pip install pyfqmr
 ```
 
-### 4. Run
+### 6. Run
 
 ```bash
-/path/to/Hunyuan3D-2/.venv/bin/python server.py --host 0.0.0.0 --port 8000
+.venv/bin/python server.py --host 0.0.0.0 --port 8000
 ```
 
 Open `http://YOUR_GPU_HOST:8000` in a browser.
 
-### 5. (Optional) Install as systemd service
+### 7. (Optional) Install as systemd service
 
 ```bash
 sudo bash setup.sh
