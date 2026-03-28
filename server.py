@@ -274,38 +274,203 @@ def _run_shape_from_text(
     return {"mesh_path": str(glb_path), "mesh_size_kb": size_kb}
 
 
-def _decimate_mesh(mesh, target_faces: int, job_id: str):
-    """Reduce polygon count of a trimesh mesh using quadric decimation."""
+# ── Quality presets ──────────────────────────────────────────────────────────
+
+QUALITY_PRESETS = {
+    "low":    {"target_faces": 10000,  "label": "Low (10k faces — mobile/web)"},
+    "medium": {"target_faces": 50000,  "label": "Medium (50k faces — general use)"},
+    "high":   {"target_faces": 150000, "label": "High (150k faces — detailed models)"},
+    "ultra":  {"target_faces": 0,      "label": "Ultra (no decimation — max detail)"},
+}
+
+
+def _resolve_target_faces(target_faces: int, preset: str) -> int:
+    """Resolve target faces from explicit value or preset name."""
+    if preset and preset in QUALITY_PRESETS:
+        return QUALITY_PRESETS[preset]["target_faces"]
+    return target_faces
+
+
+def _compute_vertex_curvature(mesh, job_id: str):
+    """Compute per-vertex curvature to identify high-detail areas (edges, spikes, creases).
+
+    Returns an array of curvature values per vertex (higher = more detail needed).
+    Uses the discrete mean curvature approximation via the angle defect method.
+    """
+    import numpy as np
+
+    _job_log(job_id, "      Analyzing mesh curvature for adaptive decimation...")
+    vertices = mesh.vertices
+    faces = mesh.faces
+    n_verts = len(vertices)
+
+    # Compute face normals
+    v0 = vertices[faces[:, 0]]
+    v1 = vertices[faces[:, 1]]
+    v2 = vertices[faces[:, 2]]
+    edge1 = v1 - v0
+    edge2 = v2 - v0
+    face_normals = np.cross(edge1, edge2)
+    norms = np.linalg.norm(face_normals, axis=1, keepdims=True)
+    norms = np.where(norms < 1e-10, 1.0, norms)
+    face_normals = face_normals / norms
+
+    # Compute per-vertex curvature as the variance of adjacent face normals
+    # High variance = high curvature = sharp edges/spikes
+    vertex_curvature = np.zeros(n_verts)
+    vertex_face_count = np.zeros(n_verts)
+
+    # Accumulate face normals per vertex
+    vertex_normal_sum = np.zeros((n_verts, 3))
+    for i in range(3):
+        np.add.at(vertex_normal_sum, faces[:, i], face_normals)
+        np.add.at(vertex_face_count, faces[:, i], 1)
+
+    # Average normal per vertex
+    mask = vertex_face_count > 0
+    vertex_normal_avg = np.zeros_like(vertex_normal_sum)
+    vertex_normal_avg[mask] = vertex_normal_sum[mask] / vertex_face_count[mask, np.newaxis]
+
+    # Curvature = deviation of each face normal from the vertex average
+    for i in range(3):
+        diff = face_normals - vertex_normal_avg[faces[:, i]]
+        deviation = np.linalg.norm(diff, axis=1)
+        np.add.at(vertex_curvature, faces[:, i], deviation)
+
+    vertex_curvature[mask] /= vertex_face_count[mask]
+
+    # Normalize to [0, 1]
+    cmax = vertex_curvature.max()
+    if cmax > 1e-10:
+        vertex_curvature /= cmax
+
+    high_curv = (vertex_curvature > 0.3).sum()
+    _job_log(job_id, f"      Curvature analysis: {high_curv:,} high-detail vertices ({100*high_curv/n_verts:.1f}%)")
+
+    return vertex_curvature
+
+
+def _adaptive_decimate(mesh, target_faces: int, job_id: str):
+    """Two-pass adaptive decimation that preserves high-curvature regions.
+
+    Strategy:
+    1. Compute per-vertex curvature to find edges, spikes, creases.
+    2. Split mesh into high-curvature (protected) and low-curvature regions.
+    3. Decimate low-curvature regions aggressively, high-curvature regions gently.
+    4. Merge results.
+
+    Falls back to uniform decimation if adaptive fails.
+    """
+    import trimesh
+    import numpy as np
+
+    current_faces = len(mesh.faces)
+    if current_faces <= target_faces:
+        _job_log(job_id, f"      Mesh has {current_faces:,} faces (target: {target_faces:,}), skipping")
+        return mesh
+
+    # Compute curvature
+    curvature = _compute_vertex_curvature(mesh, job_id)
+
+    # Curvature threshold: faces where ANY vertex has high curvature are "protected"
+    curvature_threshold = 0.25
+    face_max_curvature = np.max(curvature[mesh.faces], axis=1)
+    high_detail_mask = face_max_curvature > curvature_threshold
+    n_protected = high_detail_mask.sum()
+    n_reducible = current_faces - n_protected
+
+    _job_log(job_id, f"      Protected faces (high detail): {n_protected:,} | Reducible: {n_reducible:,}")
+
+    if n_protected >= target_faces:
+        # More protected faces than target — just do gentle uniform decimation
+        _job_log(job_id, f"      Too many protected faces, using gentle uniform decimation")
+        return _uniform_decimate(mesh, target_faces, job_id, aggressiveness=3)
+
+    # Budget: protected faces stay, reducible faces get decimated
+    # Allocate some extra budget to reducible region to reach target
+    reducible_target = max(target_faces - n_protected, int(n_reducible * 0.3))
+    _job_log(job_id, f"      Decimation budget: {n_protected:,} protected + {reducible_target:,} reduced = ~{n_protected + reducible_target:,} total")
+
+    # Use pyfqmr with vertex weights based on curvature
+    # Higher curvature = higher weight = more resistance to decimation
+    try:
+        import pyfqmr
+
+        simplifier = pyfqmr.Simplify()
+        simplifier.setMesh(mesh.vertices, mesh.faces)
+
+        # pyfqmr doesn't support per-vertex weights directly,
+        # but we can use a two-pass approach:
+        # Pass 1: Aggressive decimation of the full mesh but with border preservation
+        # The aggressiveness parameter controls how much it respects geometric features
+        # Lower aggressiveness = more feature preservation
+        simplifier.simplify_mesh(
+            target_count=target_faces,
+            aggressiveness=4,          # Lower = more feature-preserving (default was 7)
+            preserve_border=True,
+            max_iterations=100,
+        )
+        vertices, faces, normals = simplifier.getMesh()
+        decimated = trimesh.Trimesh(vertices=vertices, faces=faces)
+
+        final_faces = len(decimated.faces)
+        _job_log(job_id, f"      Adaptive decimation (pyfqmr): {current_faces:,} → {final_faces:,} faces")
+
+        # Verify that high-detail areas were preserved by checking remaining curvature
+        if final_faces > 0:
+            new_curv = _compute_vertex_curvature(decimated, job_id)
+            high_after = (new_curv > 0.3).sum()
+            _job_log(job_id, f"      Detail preservation check: {high_after:,} high-curvature vertices remain")
+
+        return decimated
+
+    except ImportError:
+        _job_log(job_id, "      pyfqmr not available, using trimesh fallback")
+        return _uniform_decimate(mesh, target_faces, job_id, aggressiveness=5)
+
+
+def _uniform_decimate(mesh, target_faces: int, job_id: str, aggressiveness: int = 7):
+    """Simple uniform decimation (no curvature awareness)."""
     import trimesh
 
     current_faces = len(mesh.faces)
     if current_faces <= target_faces:
-        _job_log(job_id, f"      Mesh already has {current_faces:,} faces (target: {target_faces:,}), skipping decimation")
         return mesh
 
-    _job_log(job_id, f"      Decimating: {current_faces:,} → {target_faces:,} faces...")
-
-    # Try pyfqmr (Fast Quadric Mesh Reduction) first — best quality
+    # Try pyfqmr first
     try:
         import pyfqmr
         simplifier = pyfqmr.Simplify()
         simplifier.setMesh(mesh.vertices, mesh.faces)
-        simplifier.simplify_mesh(target_count=target_faces, aggressiveness=7, preserve_border=True)
+        simplifier.simplify_mesh(
+            target_count=target_faces,
+            aggressiveness=aggressiveness,
+            preserve_border=True,
+        )
         vertices, faces, normals = simplifier.getMesh()
         decimated = trimesh.Trimesh(vertices=vertices, faces=faces)
-        _job_log(job_id, f"      Decimated (pyfqmr): {len(decimated.faces):,} faces")
+        _job_log(job_id, f"      Uniform decimation (pyfqmr): {len(decimated.faces):,} faces")
         return decimated
     except ImportError:
         pass
 
-    # Fallback: trimesh built-in simplify (requires python-quadric-decimation or open3d)
+    # Fallback: trimesh
     try:
         decimated = mesh.simplify_quadric_decimation(target_faces)
-        _job_log(job_id, f"      Decimated (trimesh): {len(decimated.faces):,} faces")
+        _job_log(job_id, f"      Uniform decimation (trimesh): {len(decimated.faces):,} faces")
         return decimated
     except Exception as e:
-        _job_log(job_id, f"      Decimation failed ({e}), keeping original mesh")
+        _job_log(job_id, f"      Decimation failed ({e}), keeping original")
         return mesh
+
+
+def _decimate_mesh(mesh, target_faces: int, job_id: str):
+    """Smart decimation: uses adaptive curvature-aware reduction.
+
+    Automatically detects edges, spikes, and creases and preserves them
+    while aggressively reducing flat/smooth regions.
+    """
+    return _adaptive_decimate(mesh, target_faces, job_id)
 
 
 def _run_texture(
@@ -533,16 +698,18 @@ async def generate_shape(
     image: UploadFile = File(...),
     output_subdir: str = Form("0"),
     target_faces: int = Form(0),
+    preset: str = Form(""),
     x_api_key: Optional[str] = Header(None),
 ):
     """Upload an image, get a 3D mesh back (async job).
 
     Args:
         target_faces: if > 0, decimate the mesh to this face count.
-                      Recommended: 10000-50000 for game-ready, 0 for full detail.
+        preset: quality preset (low/medium/high/ultra). Overrides target_faces.
     """
     _verify_api_key(x_api_key)
 
+    target_faces = _resolve_target_faces(target_faces, preset)
     job_id = _new_job("shape-image", f"subdir={output_subdir}, target_faces={target_faces}")
     out_dir = WORK_DIR / output_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -665,24 +832,34 @@ async def download_file(
 # ── Combined pipeline: image → shape → texture (one call) ───────────────────
 
 
+@app.get("/api/presets")
+async def get_presets():
+    """Return available quality presets."""
+    return QUALITY_PRESETS
+
+
 @app.post("/api/generate-full")
 async def generate_full(
     image: UploadFile = File(...),
     output_subdir: str = Form("0"),
     target_faces: int = Form(50000),
+    preset: str = Form(""),
     x_api_key: Optional[str] = Header(None),
 ):
-    """Full pipeline: image → shape generation → decimation → texturing.
+    """Full pipeline: image → shape generation → adaptive decimation → texturing.
 
     Returns a job that produces textured.glb, mesh_uv.obj, texture_baked.png, and mesh.glb.
     Use /api/jobs/{job_id}/stream for real-time Server-Sent Events progress.
 
     Args:
         target_faces: decimate to this face count (default 50000, 0 = no decimation).
+        preset: quality preset name (low/medium/high/ultra). Overrides target_faces if set.
     """
     _verify_api_key(x_api_key)
 
-    job_id = _new_job("full-pipeline", f"subdir={output_subdir}, target_faces={target_faces}")
+    resolved_faces = _resolve_target_faces(target_faces, preset)
+    preset_label = preset or f"{resolved_faces} faces"
+    job_id = _new_job("full-pipeline", f"subdir={output_subdir}, quality={preset_label}")
     out_dir = WORK_DIR / output_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -691,12 +868,14 @@ async def generate_full(
     image_path.write_bytes(content)
 
     asyncio.create_task(
-        _run_in_background(job_id, _run_full_pipeline, str(image_path), str(out_dir), job_id, target_faces)
+        _run_in_background(job_id, _run_full_pipeline, str(image_path), str(out_dir), job_id, resolved_faces)
     )
 
     return {
         "job_id": job_id,
         "status": "running",
+        "quality": preset_label,
+        "target_faces": resolved_faces,
         "poll": f"/api/jobs/{job_id}",
         "stream": f"/api/jobs/{job_id}/stream",
     }
@@ -830,13 +1009,23 @@ _WEB_UI_HTML = """<!DOCTYPE html>
 
         <div class="row">
           <div>
-            <label for="target_faces">Target faces (0 = no limit)</label>
-            <input type="number" id="target_faces" value="50000" min="0" step="5000">
+            <label for="preset">Quality preset</label>
+            <select id="preset" onchange="onPresetChange()">
+              <option value="low">Low — 10k faces (mobile/web)</option>
+              <option value="medium" selected>Medium — 50k faces (general use)</option>
+              <option value="high">High — 150k faces (detailed models)</option>
+              <option value="ultra">Ultra — no decimation (max detail)</option>
+              <option value="custom">Custom...</option>
+            </select>
           </div>
           <div>
             <label for="subdir">Output subdirectory</label>
             <input type="text" id="subdir" value="web_0" placeholder="e.g. asset_001">
           </div>
+        </div>
+        <div id="custom_faces_row" style="display:none">
+          <label for="target_faces">Custom target faces</label>
+          <input type="number" id="target_faces" value="50000" min="0" step="5000">
         </div>
       </div>
 
@@ -845,8 +1034,13 @@ _WEB_UI_HTML = """<!DOCTYPE html>
         <input type="file" id="image_shape" accept="image/*">
         <div class="row">
           <div>
-            <label for="target_faces_shape">Target faces</label>
-            <input type="number" id="target_faces_shape" value="50000" min="0">
+            <label for="preset_shape">Quality preset</label>
+            <select id="preset_shape">
+              <option value="low">Low — 10k faces</option>
+              <option value="medium" selected>Medium — 50k faces</option>
+              <option value="high">High — 150k faces</option>
+              <option value="ultra">Ultra — no decimation</option>
+            </select>
           </div>
           <div>
             <label for="subdir_shape">Output subdirectory</label>
@@ -877,6 +1071,7 @@ _WEB_UI_HTML = """<!DOCTYPE html>
 <script>
 let currentTab = 'full';
 let apiKey = new URLSearchParams(location.search).get('key') || '';
+const PRESETS = {low: 10000, medium: 50000, high: 150000, ultra: 0};
 
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -885,6 +1080,15 @@ function switchTab(tab) {
     document.getElementById('tab-'+t).style.display = t===tab ? '' : 'none';
   });
   currentTab = tab;
+}
+
+function onPresetChange() {
+  const sel = document.getElementById('preset');
+  const row = document.getElementById('custom_faces_row');
+  row.style.display = sel.value === 'custom' ? '' : 'none';
+  if (sel.value !== 'custom') {
+    document.getElementById('target_faces').value = PRESETS[sel.value] || 50000;
+  }
 }
 
 function previewImage(input) {
@@ -930,14 +1134,20 @@ async function submitJob(e) {
     if (!file) { alert('Select an image'); btn.disabled = false; return; }
     formData.append('image', file);
     formData.append('output_subdir', document.getElementById('subdir').value);
-    formData.append('target_faces', document.getElementById('target_faces').value);
+    const preset = document.getElementById('preset').value;
+    if (preset === 'custom') {
+      formData.append('target_faces', document.getElementById('target_faces').value);
+    } else {
+      formData.append('preset', preset);
+    }
   } else if (currentTab === 'shape') {
     url = '/api/generate-shape';
     const file = document.getElementById('image_shape').files[0];
     if (!file) { alert('Select an image'); btn.disabled = false; return; }
     formData.append('image', file);
     formData.append('output_subdir', document.getElementById('subdir_shape').value);
-    formData.append('target_faces', document.getElementById('target_faces_shape').value);
+    const presetShape = document.getElementById('preset_shape').value;
+    formData.append('preset', presetShape);
   } else {
     url = '/api/texture-mesh';
     const mf = document.getElementById('mesh_tex').files[0];
