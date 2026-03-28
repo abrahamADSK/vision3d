@@ -22,36 +22,59 @@ Built on [Hunyuan3D-2](https://github.com/Tencent/Hunyuan3D-2) by Tencent, expos
 
 ## Quick Start
 
-### 1. Clone
+### 1. Install Hunyuan3D-2 (prerequisite)
+
+Vision3D uses Hunyuan3D-2 for inference. Install it first on your GPU machine:
 
 ```bash
-git clone https://github.com/YOUR_USER/vision3d.git
+git clone https://github.com/Tencent/Hunyuan3D-2.git
+cd Hunyuan3D-2
+python3 -m venv .venv
+.venv/bin/pip install -e .
+```
+
+Download the model weights (~10 GB):
+
+```bash
+.venv/bin/python -c "
+from huggingface_hub import snapshot_download
+snapshot_download('tencent/Hunyuan3D-2', allow_patterns='hunyuan3d-dit-v2-0-turbo/*')
+snapshot_download('tencent/Hunyuan3D-2', allow_patterns='hunyuan3d-paint-v2-0-turbo/*')
+"
+```
+
+Move or symlink the weights to your models directory (default: `~/ai-studio/vision/hf_models`), or set `GPU_MODELS_DIR` to where they were downloaded.
+
+### 2. Clone Vision3D
+
+```bash
+git clone https://github.com/abrahamADSK/vision3d.git
 cd vision3d
 ```
 
-### 2. Install dependencies
+### 3. Install Vision3D dependencies
 
-Into your existing Hunyuan3D-2 venv:
+Into the Hunyuan3D-2 venv:
 
 ```bash
-.venv/bin/pip install -r requirements.txt
+/path/to/Hunyuan3D-2/.venv/bin/pip install -r requirements.txt
 ```
 
 For better polygon decimation (recommended):
 
 ```bash
-.venv/bin/pip install pyfqmr
+/path/to/Hunyuan3D-2/.venv/bin/pip install pyfqmr
 ```
 
-### 3. Run
+### 4. Run
 
 ```bash
-.venv/bin/python server.py --host 0.0.0.0 --port 8000
+/path/to/Hunyuan3D-2/.venv/bin/python server.py --host 0.0.0.0 --port 8000
 ```
 
 Open `http://YOUR_GPU_HOST:8000` in a browser.
 
-### 4. (Optional) Install as systemd service
+### 5. (Optional) Install as systemd service
 
 ```bash
 sudo bash setup.sh
@@ -95,9 +118,9 @@ All configuration is via environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GPU_API_KEY` | _(empty = open)_ | API key for authentication. Leave empty for LAN use. |
-| `GPU_MODELS_DIR` | `~/ai-studio/vision/hf_models` | Path to Hunyuan3D-2 model weights |
-| `GPU_WORK_DIR` | `~/ai-studio/reference/3d_output` | Working directory for job outputs |
-| `GPU_VISION_DIR` | `~/ai-studio/vision` | Vision3D installation directory |
+| `GPU_MODELS_DIR` | `./hf_models` | Path to Hunyuan3D-2 model weights |
+| `GPU_WORK_DIR` | `./output` | Working directory for job outputs |
+| `GPU_VISION_DIR` | `.` (script dir) | Vision3D installation directory |
 
 ## Architecture
 
@@ -122,7 +145,7 @@ Browser / MCP client / curl
 
 ## Integration with maya-mcp
 
-Vision3D is designed to work standalone or as the GPU backend for [maya-mcp](https://github.com/YOUR_USER/maya-mcp-project). In that setup, maya-mcp calls Vision3D's API to generate 3D assets and imports them into Autodesk Maya.
+Vision3D is designed to work standalone or as the GPU backend for [maya-mcp](https://github.com/abrahamADSK/maya-mcp-project). In that setup, maya-mcp calls Vision3D's API to generate 3D assets and imports them into Autodesk Maya.
 
 ## License
 

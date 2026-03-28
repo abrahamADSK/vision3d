@@ -94,7 +94,7 @@ echo "[4/5] Creating systemd service..."
 SERVICE_FILE="/etc/systemd/system/vision3d.service"
 sudo tee "$SERVICE_FILE" > /dev/null <<UNIT
 [Unit]
-Description=Vision3D Vision3D — AI 3D Generation Server
+Description=Vision3D — AI 3D Generation Server
 After=network.target
 
 [Service]

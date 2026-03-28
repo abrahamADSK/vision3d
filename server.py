@@ -47,20 +47,21 @@ from fastapi.staticfiles import StaticFiles
 # ── Configuration ────────────────────────────────────────────────────────────
 
 API_KEY = os.environ.get("GPU_API_KEY", "")
+_SCRIPT_DIR = Path(__file__).resolve().parent
 MODELS_DIR = os.environ.get(
     "GPU_MODELS_DIR",
-    os.path.expanduser("~/ai-studio/vision/hf_models"),
+    str(_SCRIPT_DIR / "hf_models"),
 )
 WORK_DIR = Path(
     os.environ.get(
         "GPU_WORK_DIR",
-        os.path.expanduser("~/ai-studio/reference/3d_output"),
+        str(_SCRIPT_DIR / "output"),
     )
 )
 VISION_DIR = Path(
     os.environ.get(
         "GPU_VISION_DIR",
-        os.path.expanduser("~/ai-studio/vision"),
+        str(_SCRIPT_DIR),
     )
 )
 
