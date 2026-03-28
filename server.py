@@ -1215,6 +1215,13 @@ async function submitJob(e) {
     const headers = {};
     if (apiKey) headers['x-api-key'] = apiKey;
     const resp = await fetch(url, { method: 'POST', body: formData, headers });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      addLog('Server error (' + resp.status + '): ' + errText.substring(0, 500), 'error');
+      status.textContent = 'Failed';
+      btn.disabled = false;
+      return;
+    }
     const job = await resp.json();
     if (!job.job_id) { addLog('Error: ' + JSON.stringify(job), 'error'); btn.disabled = false; return; }
 
@@ -1272,7 +1279,7 @@ async function submitJob(e) {
     };
 
   } catch (err) {
-    addLog('Error: ' + err.message, 'error');
+    addLog('Error: ' + err.message + ' (URL: ' + url + ')', 'error');
     status.textContent = 'Failed';
     btn.disabled = false;
   }
