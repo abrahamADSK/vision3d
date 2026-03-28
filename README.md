@@ -93,6 +93,7 @@ This creates a `vision3d.service` that starts on boot, generates an API key, and
 |--------|------|-------------|
 | `GET` | `/` | Web UI |
 | `GET` | `/api/health` | Health check + GPU info |
+| `GET` | `/api/presets` | List available quality presets |
 | `POST` | `/api/generate-full` | Full pipeline: image → shape → decimate → texture |
 | `POST` | `/api/generate-shape` | Image → mesh (shape only) |
 | `POST` | `/api/generate-text` | Text prompt → mesh |
@@ -101,14 +102,31 @@ This creates a `vision3d.service` that starts on boot, generates an API key, and
 | `GET` | `/api/jobs/{id}/stream` | SSE real-time progress |
 | `GET` | `/api/jobs/{id}/files/{name}` | Download result file |
 
+### Quality presets
+
+Each preset controls both the generation quality (mesh resolution, inference steps) and the post-processing (polygon decimation):
+
+| Preset | Faces | Octree Resolution | Inference Steps | Use case |
+|--------|-------|-------------------|-----------------|----------|
+| `low` | 10k | 256 | 20 | Mobile/web, fast previews |
+| `medium` | 50k | 384 | 30 | General use (default) |
+| `high` | 150k | 384 | 50 | Detailed models |
+| `ultra` | no limit | 512 | 50 | Maximum geometric detail |
+
+Higher `octree_resolution` produces finer surface detail (edges, spikes, creases). Higher `num_inference_steps` improves shape accuracy but takes longer.
+
 ### Example: Full pipeline with curl
 
 ```bash
+# Using a preset:
 curl -X POST http://localhost:8000/api/generate-full \
   -F "image=@photo.png" \
-  -F "target_faces=50000" \
-  -F "output_subdir=my_asset"
-# Returns: {"job_id": "abc123", "status": "running", "poll": "/api/jobs/abc123", "stream": "/api/jobs/abc123/stream"}
+  -F "preset=high"
+
+# Or with explicit face count:
+curl -X POST http://localhost:8000/api/generate-full \
+  -F "image=@photo.png" \
+  -F "target_faces=50000"
 
 # Poll until done:
 curl http://localhost:8000/api/jobs/abc123

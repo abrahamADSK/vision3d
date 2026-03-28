@@ -28,11 +28,8 @@ Environment:
 """
 
 import asyncio
-import hashlib
 import os
 import secrets
-import shutil
-import tempfile
 import time
 import traceback
 import uuid
@@ -41,9 +38,8 @@ from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, Header, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Header, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -707,9 +703,9 @@ async def _run_in_background(job_id: str, func, *args):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     WORK_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[GPU Server] Models dir: {MODELS_DIR}")
-    print(f"[GPU Server] Work dir:   {WORK_DIR}")
-    print(f"[GPU Server] API key:    {'configured' if API_KEY else 'NONE (open access)'}")
+    print(f"[Vision3D] Models dir: {MODELS_DIR}")
+    print(f"[Vision3D] Work dir:   {WORK_DIR}")
+    print(f"[Vision3D] API key:    {'configured' if API_KEY else 'NONE (open access)'}")
     yield
 
 
@@ -779,17 +775,22 @@ async def generate_text(
     text_prompt: str = Form(...),
     output_subdir: str = Form("0"),
     target_faces: int = Form(0),
+    preset: str = Form(""),
     x_api_key: Optional[str] = Header(None),
 ):
     """Generate 3D mesh from text prompt (async job)."""
     _verify_api_key(x_api_key)
 
+    params = _resolve_preset(target_faces, preset)
     job_id = _new_job("shape-text", f"prompt={text_prompt[:50]}")
     out_dir = WORK_DIR / output_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     asyncio.create_task(
-        _run_in_background(job_id, _run_shape_from_text, text_prompt, str(out_dir), job_id, target_faces)
+        _run_in_background(
+            job_id, _run_shape_from_text, text_prompt, str(out_dir), job_id,
+            params["target_faces"], params["octree_resolution"], params["num_inference_steps"],
+        )
     )
 
     return {"job_id": job_id, "status": "running", "poll": f"/api/jobs/{job_id}"}
@@ -947,6 +948,8 @@ async def stream_job(job_id: str, x_api_key: Optional[str] = Header(None)):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    import json
+
     async def event_generator():
         last_log_len = 0
 
@@ -977,8 +980,6 @@ async def stream_job(job_id: str, x_api_key: Optional[str] = Header(None)):
 
             yield f"event: status\ndata: running\n\n"
             await asyncio.sleep(2)
-
-    import json
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -1208,7 +1209,7 @@ async function submitJob(e) {
     formData.append('output_subdir', document.getElementById('subdir_tex').value);
   }
 
-  addLog('Uploading to GPU server...', '');
+  addLog('Uploading to Vision3D...', '');
   status.textContent = 'Uploading...';
 
   try {

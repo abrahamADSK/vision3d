@@ -8,7 +8,7 @@
 #   1. Installs FastAPI + uvicorn into the existing venv
 #   2. Generates a random API key (saved to .api_key)
 #   3. Installs Caddy (if not present)
-#   4. Creates a systemd service for the GPU server
+#   4. Creates a systemd service for the Vision3D server
 #   5. Creates a systemd service for Caddy
 #   6. Prints the config values to use on the Mac
 
@@ -88,7 +88,7 @@ else
     echo "      Caddy installed: $(caddy version)"
 fi
 
-# ── 4. Create systemd service for GPU server ─────────────────────────────────
+# ── 4. Create systemd service for Vision3D server ─────────────────────────────────
 
 echo "[4/5] Creating systemd service..."
 
@@ -150,7 +150,7 @@ echo "════════════════════════�
 echo " Setup complete!"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
-echo " GPU Server:  http://localhost:$PORT/api/health"
+echo " Vision3D:    http://localhost:$PORT/api/health"
 echo " Caddy HTTPS: https://$HOSTNAME:$CADDY_PORT/api/health"
 echo ""
 echo " API Key:     $API_KEY"
@@ -173,7 +173,7 @@ echo ""
 # Verify health
 echo "Verifying..."
 if curl -sf "http://localhost:$PORT/api/health" > /dev/null 2>&1; then
-    echo "✓ GPU server is running"
+    echo "✓ Vision3D server is running"
 else
-    echo "⚠ GPU server may still be starting — check: systemctl status vision3d"
+    echo "⚠ Vision3D server may still be starting — check: systemctl status vision3d"
 fi
