@@ -925,7 +925,7 @@ async def generate_full(
         "job_id": job_id,
         "status": "running",
         "quality": preset_label,
-        "target_faces": resolved_faces,
+        "target_faces": params["target_faces"],
         "poll": f"/api/jobs/{job_id}",
         "stream": f"/api/jobs/{job_id}/stream",
     }
