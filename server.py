@@ -117,6 +117,10 @@ def _verify_api_key(x_api_key: Optional[str]):
 _shape_pipeline = None
 _shape_pipeline_name = None
 _paint_pipeline = None
+_t2i_pipeline = None
+
+# HunyuanDiT model for text-to-image (required for text-to-3D)
+T2I_MODEL = "Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled"
 
 # Map user-facing model names to HunyuanD-2 subfolder names
 SHAPE_MODELS = {
@@ -197,6 +201,30 @@ def _get_paint_pipeline():
     return _paint_pipeline
 
 
+def _get_t2i_pipeline():
+    """Load text-to-image pipeline (HunyuanDiT). Required for text-to-3D."""
+    import torch
+    global _t2i_pipeline
+
+    if _t2i_pipeline is not None:
+        return _t2i_pipeline
+
+    try:
+        from hy3dgen.text2image import HunyuanDiTPipeline
+    except ImportError:
+        raise RuntimeError(
+            "text2image module not found. Text-to-3D requires "
+            "hy3dgen.text2image (HunyuanDiTPipeline). "
+            "Make sure Hunyuan3D-2 is fully installed."
+        )
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"[T2I] Loading HunyuanDiT from {T2I_MODEL} on {device}...")
+    _t2i_pipeline = HunyuanDiTPipeline(T2I_MODEL, device=device)
+    print("[T2I] HunyuanDiT loaded successfully.")
+    return _t2i_pipeline
+
+
 # ── Inference functions (run in thread pool) ─────────────────────────────────
 
 
@@ -273,18 +301,40 @@ def _run_shape_from_text(
     num_inference_steps: int = 30,
     model: str = "turbo",
 ) -> dict:
-    """Text → 3D shape generation (blocking, runs in thread)."""
+    """Text → image → 3D shape generation (blocking, runs in thread).
+
+    The shape pipeline (Hunyuan3DDiTFlowMatchingPipeline) only accepts image=,
+    NOT text=.  For text-to-3D we first generate a reference image using
+    HunyuanDiT (text-to-image), then feed that image to the shape pipeline.
+    """
     import torch
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
-    _job_log(job_id, f"[1/4] Loading shape pipeline ({model})...")
+    # ── Step 1: Text → Image via HunyuanDiT ──────────────────────────
+    _job_log(job_id, f"[1/5] Loading text-to-image model (HunyuanDiT)...")
+    t2i = _get_t2i_pipeline()
+
+    _job_log(job_id, f"[2/5] Generating reference image from text: '{text_prompt}'...")
+    ref_image = t2i(text_prompt)
+    if ref_image is None:
+        raise RuntimeError(
+            f"Text-to-image generation returned None for prompt: '{text_prompt}'. "
+            "Check HunyuanDiT model installation."
+        )
+    # Save the intermediate image for debugging / reference
+    ref_path = output / "text2img_reference.png"
+    ref_image.save(str(ref_path))
+    _job_log(job_id, f"      Reference image generated: {ref_image.size[0]}x{ref_image.size[1]}")
+
+    # ── Step 2: Image → 3D via shape pipeline ─────────────────────────
+    _job_log(job_id, f"[3/5] Loading shape pipeline ({model})...")
     pipeline = _get_shape_pipeline(model)
 
-    _job_log(job_id, f"[2/4] Generating from text: '{text_prompt}' (octree={octree_resolution}, steps={num_inference_steps})...")
+    _job_log(job_id, f"[3/5] Generating 3D shape (octree={octree_resolution}, steps={num_inference_steps})...")
     result = pipeline(
-        text=text_prompt,
+        image=ref_image,
         octree_resolution=octree_resolution,
         num_inference_steps=num_inference_steps,
     )
@@ -296,23 +346,28 @@ def _run_shape_from_text(
 
     # Decimation
     if target_faces > 0:
-        _job_log(job_id, "[3/4] Decimating mesh...")
+        _job_log(job_id, "[4/5] Decimating mesh...")
         import trimesh as _tri
         tri_mesh = _tri.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
         tri_mesh = _decimate_mesh(tri_mesh, target_faces, job_id)
         glb_path = output / "mesh.glb"
         tri_mesh.export(str(glb_path))
     else:
-        _job_log(job_id, "[3/4] Skipping decimation")
+        _job_log(job_id, "[4/5] Skipping decimation")
         glb_path = output / "mesh.glb"
         mesh.export(str(glb_path))
 
-    _job_log(job_id, "[4/4] Saving mesh.glb...")
+    _job_log(job_id, "[5/5] Saving mesh.glb...")
     size_kb = glb_path.stat().st_size // 1024
 
     torch.cuda.empty_cache()
 
-    return {"mesh_path": str(glb_path), "mesh_size_kb": size_kb}
+    return {
+        "mesh_path": str(glb_path),
+        "mesh_size_kb": size_kb,
+        "output_dir": str(output),
+        "files": ["mesh.glb", "text2img_reference.png"],
+    }
 
 
 # ── Quality presets ──────────────────────────────────────────────────────────
@@ -777,6 +832,13 @@ async def health():
             )
     except ImportError:
         info["gpu"] = "torch not available"
+    info["models"] = _get_available_models()
+    # Check if text-to-image module is available
+    try:
+        from hy3dgen.text2image import HunyuanDiTPipeline  # noqa: F401
+        info["text_to_3d"] = "available (HunyuanDiT)"
+    except ImportError:
+        info["text_to_3d"] = "unavailable (hy3dgen.text2image not found)"
     return info
 
 
