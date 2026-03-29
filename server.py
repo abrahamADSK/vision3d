@@ -115,33 +115,67 @@ def _verify_api_key(x_api_key: Optional[str]):
 # ── Pipeline loaders (lazy, cached) ─────────────────────────────────────────
 
 _shape_pipeline = None
+_shape_pipeline_name = None
 _paint_pipeline = None
 
+# Map user-facing model names to HunyuanD-2 subfolder names
+SHAPE_MODELS = {
+    "turbo": "hunyuan3d-dit-v2-0-turbo",
+    "fast":  "hunyuan3d-dit-v2-0-fast",
+    "full":  "hunyuan3d-dit-v2-0",
+}
 
-def _get_shape_pipeline():
-    global _shape_pipeline
-    if _shape_pipeline is None:
-        from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
 
-        candidates = [
-            (MODELS_DIR, "hunyuan3d-dit-v2-0-fast"),
-            (MODELS_DIR, "hunyuan3d-dit-v2-0-turbo"),
-            (MODELS_DIR, "hunyuan3d-dit-v2-0"),
-        ]
-        for base, sub in candidates:
-            path = os.path.join(base, sub)
-            model_file = os.path.join(path, "model.fp16.safetensors")
-            if os.path.isdir(path) and os.path.exists(model_file):
-                print(f"[Shape] Loading from local: {path}")
-                _shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-                    base, subfolder=sub
-                )
-                return _shape_pipeline
+def _get_available_models():
+    """Return list of model names that have weights on disk."""
+    available = []
+    for name, subfolder in SHAPE_MODELS.items():
+        path = os.path.join(MODELS_DIR, subfolder)
+        safetensors = os.path.join(path, "model.fp16.safetensors")
+        ckpt = os.path.join(path, "model.fp16.ckpt")
+        if os.path.isdir(path) and (os.path.exists(safetensors) or os.path.exists(ckpt)):
+            available.append(name)
+    return available
 
-        print("[Shape] Loading from HuggingFace Hub...")
+
+def _get_shape_pipeline(model_name: str = "turbo"):
+    """Load shape pipeline by model name. Swaps models if a different one is requested."""
+    import torch
+    global _shape_pipeline, _shape_pipeline_name
+
+    if _shape_pipeline is not None and _shape_pipeline_name == model_name:
+        return _shape_pipeline
+
+    subfolder = SHAPE_MODELS.get(model_name)
+    if not subfolder:
+        print(f"[Shape] Unknown model '{model_name}', falling back to turbo")
+        model_name = "turbo"
+        subfolder = SHAPE_MODELS["turbo"]
+
+    # Unload current model if switching
+    if _shape_pipeline is not None:
+        print(f"[Shape] Unloading {_shape_pipeline_name} to load {model_name}...")
+        del _shape_pipeline
+        _shape_pipeline = None
+        _shape_pipeline_name = None
+        torch.cuda.empty_cache()
+
+    from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
+
+    path = os.path.join(MODELS_DIR, subfolder)
+    model_file = os.path.join(path, "model.fp16.safetensors")
+    if os.path.isdir(path) and os.path.exists(model_file):
+        print(f"[Shape] Loading {model_name} from local: {path}")
         _shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-            "tencent/Hunyuan3D-2", subfolder="hunyuan3d-dit-v2-0-turbo"
+            MODELS_DIR, subfolder=subfolder
         )
+    else:
+        print(f"[Shape] Loading {model_name} from HuggingFace Hub...")
+        _shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
+            "tencent/Hunyuan3D-2", subfolder=subfolder
+        )
+
+    _shape_pipeline_name = model_name
     return _shape_pipeline
 
 
@@ -171,14 +205,9 @@ def _run_shape_from_image(
     target_faces: int = 0,
     octree_resolution: int = 384,
     num_inference_steps: int = 30,
+    model: str = "turbo",
 ) -> dict:
-    """Image → 3D shape generation (blocking, runs in thread).
-
-    Args:
-        target_faces: if > 0, decimate the mesh to this face count after generation.
-        octree_resolution: marching cubes grid resolution (higher = more detail).
-        num_inference_steps: denoising steps (higher = better quality, slower).
-    """
+    """Image → 3D shape generation (blocking, runs in thread)."""
     import torch
     from PIL import Image
     import numpy as np
@@ -186,8 +215,8 @@ def _run_shape_from_image(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
-    _job_log(job_id, "[1/5] Loading shape pipeline...")
-    pipeline = _get_shape_pipeline()
+    _job_log(job_id, f"[1/5] Loading shape pipeline ({model})...")
+    pipeline = _get_shape_pipeline(model)
 
     _job_log(job_id, f"[2/5] Loading image: {image_path}")
     image = Image.open(image_path).convert("RGBA")
@@ -242,6 +271,7 @@ def _run_shape_from_text(
     target_faces: int = 0,
     octree_resolution: int = 384,
     num_inference_steps: int = 30,
+    model: str = "turbo",
 ) -> dict:
     """Text → 3D shape generation (blocking, runs in thread)."""
     import torch
@@ -249,8 +279,8 @@ def _run_shape_from_text(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
-    _job_log(job_id, "[1/4] Loading shape pipeline...")
-    pipeline = _get_shape_pipeline()
+    _job_log(job_id, f"[1/4] Loading shape pipeline ({model})...")
+    pipeline = _get_shape_pipeline(model)
 
     _job_log(job_id, f"[2/4] Generating from text: '{text_prompt}' (octree={octree_resolution}, steps={num_inference_steps})...")
     result = pipeline(
@@ -291,38 +321,54 @@ QUALITY_PRESETS = {
     "low": {
         "target_faces": 10000,
         "octree_resolution": 256,
-        "num_inference_steps": 20,
-        "label": "Low (10k faces — mobile/web, fast)",
+        "num_inference_steps": 10,
+        "model": "turbo",
+        "label": "Low — turbo, 10k faces, fast",
     },
     "medium": {
         "target_faces": 50000,
         "octree_resolution": 384,
-        "num_inference_steps": 30,
-        "label": "Medium (50k faces — general use)",
+        "num_inference_steps": 20,
+        "model": "turbo",
+        "label": "Medium — turbo, 50k faces",
     },
     "high": {
         "target_faces": 150000,
         "octree_resolution": 384,
-        "num_inference_steps": 50,
-        "label": "High (150k faces — detailed models)",
+        "num_inference_steps": 30,
+        "model": "full",
+        "label": "High — full model, 150k faces",
     },
     "ultra": {
         "target_faces": 0,
         "octree_resolution": 512,
         "num_inference_steps": 50,
-        "label": "Ultra (no decimation — max detail)",
+        "model": "full",
+        "label": "Ultra — full model, max detail",
     },
 }
 
 
-def _resolve_preset(target_faces: int, preset: str) -> dict:
-    """Resolve generation parameters from preset name or fall back to defaults."""
+def _resolve_preset(target_faces: int, preset: str, model: str = "",
+                    octree_resolution: int = 0, num_inference_steps: int = 0) -> dict:
+    """Resolve generation parameters from preset or explicit values."""
     if preset and preset in QUALITY_PRESETS:
-        return QUALITY_PRESETS[preset].copy()
+        params = QUALITY_PRESETS[preset].copy()
+        # Allow explicit overrides even with a preset
+        if model:
+            params["model"] = model
+        if octree_resolution > 0:
+            params["octree_resolution"] = octree_resolution
+        if num_inference_steps > 0:
+            params["num_inference_steps"] = num_inference_steps
+        if target_faces >= 0 and not preset:
+            params["target_faces"] = target_faces
+        return params
     return {
         "target_faces": target_faces,
-        "octree_resolution": 384,
-        "num_inference_steps": 30,
+        "octree_resolution": octree_resolution or 384,
+        "num_inference_steps": num_inference_steps or 30,
+        "model": model or "turbo",
     }
 
 
@@ -575,6 +621,7 @@ def _run_full_pipeline(
     target_faces: int = 50000,
     octree_resolution: int = 384,
     num_inference_steps: int = 30,
+    model: str = "turbo",
 ) -> dict:
     """Full pipeline: image → shape → decimate → texture (blocking, runs in thread)."""
     import torch
@@ -587,8 +634,8 @@ def _run_full_pipeline(
 
     # ── Phase 1: Shape generation ──────────────────────────────────
     _job_log(job_id, "═══ PHASE 1/2: SHAPE GENERATION ═══")
-    _job_log(job_id, f"[1/6] Loading shape pipeline...")
-    pipeline = _get_shape_pipeline()
+    _job_log(job_id, f"[1/6] Loading shape pipeline ({model})...")
+    pipeline = _get_shape_pipeline(model)
 
     _job_log(job_id, f"[2/6] Loading image: {image_path}")
     image = Image.open(image_path).convert("RGBA")
@@ -739,17 +786,15 @@ async def generate_shape(
     output_subdir: str = Form("0"),
     target_faces: int = Form(0),
     preset: str = Form(""),
+    model: str = Form(""),
+    octree_resolution: int = Form(0),
+    num_inference_steps: int = Form(0),
     x_api_key: Optional[str] = Header(None),
 ):
-    """Upload an image, get a 3D mesh back (async job).
-
-    Args:
-        target_faces: if > 0, decimate the mesh to this face count.
-        preset: quality preset (low/medium/high/ultra). Overrides target_faces.
-    """
+    """Upload an image, get a 3D mesh back (async job)."""
     _verify_api_key(x_api_key)
 
-    params = _resolve_preset(target_faces, preset)
+    params = _resolve_preset(target_faces, preset, model, octree_resolution, num_inference_steps)
     job_id = _new_job("shape-image", f"subdir={output_subdir}, target_faces={params['target_faces']}")
     out_dir = WORK_DIR / output_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -763,7 +808,7 @@ async def generate_shape(
     asyncio.create_task(
         _run_in_background(
             job_id, _run_shape_from_image, str(image_path), str(out_dir), job_id,
-            params["target_faces"], params["octree_resolution"], params["num_inference_steps"],
+            params["target_faces"], params["octree_resolution"], params["num_inference_steps"], params["model"],
         )
     )
 
@@ -776,12 +821,15 @@ async def generate_text(
     output_subdir: str = Form("0"),
     target_faces: int = Form(0),
     preset: str = Form(""),
+    model: str = Form(""),
+    octree_resolution: int = Form(0),
+    num_inference_steps: int = Form(0),
     x_api_key: Optional[str] = Header(None),
 ):
     """Generate 3D mesh from text prompt (async job)."""
     _verify_api_key(x_api_key)
 
-    params = _resolve_preset(target_faces, preset)
+    params = _resolve_preset(target_faces, preset, model, octree_resolution, num_inference_steps)
     job_id = _new_job("shape-text", f"prompt={text_prompt[:50]}")
     out_dir = WORK_DIR / output_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -789,7 +837,7 @@ async def generate_text(
     asyncio.create_task(
         _run_in_background(
             job_id, _run_shape_from_text, text_prompt, str(out_dir), job_id,
-            params["target_faces"], params["octree_resolution"], params["num_inference_steps"],
+            params["target_faces"], params["octree_resolution"], params["num_inference_steps"], params["model"],
         )
     )
 
@@ -886,26 +934,36 @@ async def get_presets():
     return QUALITY_PRESETS
 
 
+@app.get("/api/models")
+async def get_models():
+    """Return available shape models (those with weights on disk)."""
+    available = _get_available_models()
+    return {
+        "models": available,
+        "default": "turbo" if "turbo" in available else (available[0] if available else "turbo"),
+        "all": {name: subfolder for name, subfolder in SHAPE_MODELS.items()},
+    }
+
+
 @app.post("/api/generate-full")
 async def generate_full(
     image: UploadFile = File(...),
     output_subdir: str = Form("0"),
     target_faces: int = Form(50000),
     preset: str = Form(""),
+    model: str = Form(""),
+    octree_resolution: int = Form(0),
+    num_inference_steps: int = Form(0),
     x_api_key: Optional[str] = Header(None),
 ):
     """Full pipeline: image → shape generation → adaptive decimation → texturing.
 
     Returns a job that produces textured.glb, mesh_uv.obj, texture_baked.png, and mesh.glb.
     Use /api/jobs/{job_id}/stream for real-time Server-Sent Events progress.
-
-    Args:
-        target_faces: decimate to this face count (default 50000, 0 = no decimation).
-        preset: quality preset name (low/medium/high/ultra). Overrides target_faces if set.
     """
     _verify_api_key(x_api_key)
 
-    params = _resolve_preset(target_faces, preset)
+    params = _resolve_preset(target_faces, preset, model, octree_resolution, num_inference_steps)
     preset_label = preset or f"{params['target_faces']} faces"
     job_id = _new_job("full-pipeline", f"subdir={output_subdir}, quality={preset_label}")
     out_dir = WORK_DIR / output_subdir
@@ -918,7 +976,7 @@ async def generate_full(
     asyncio.create_task(
         _run_in_background(
             job_id, _run_full_pipeline, str(image_path), str(out_dir), job_id,
-            params["target_faces"], params["octree_resolution"], params["num_inference_steps"],
+            params["target_faces"], params["octree_resolution"], params["num_inference_steps"], params["model"],
         )
     )
 
@@ -1010,15 +1068,16 @@ _WEB_UI_HTML = """<!DOCTYPE html>
   :root { --bg: #0f1117; --card: #1a1d27; --border: #2d3040; --accent: #6c5ce7; --ok: #00b894; --fail: #e17055; --text: #dfe6e9; --dim: #636e72; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
-  .container { max-width: 800px; margin: 0 auto; padding: 2rem 1rem; }
+  .container { max-width: 860px; margin: 0 auto; padding: 2rem 1rem; }
   h1 { font-size: 1.5rem; margin-bottom: .5rem; }
   .subtitle { color: var(--dim); margin-bottom: 2rem; font-size: .9rem; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
-  .card h2 { font-size: 1.1rem; margin-bottom: 1rem; }
   label { display: block; color: var(--dim); font-size: .85rem; margin-bottom: .3rem; margin-top: .8rem; }
   input[type=file], input[type=number], input[type=text], select { width: 100%; padding: .6rem .8rem; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: .9rem; }
   .row { display: flex; gap: 1rem; }
   .row > * { flex: 1; }
+  .row3 { display: flex; gap: .75rem; }
+  .row3 > * { flex: 1; }
   button { padding: .7rem 1.5rem; border: none; border-radius: 8px; font-size: .95rem; cursor: pointer; font-weight: 600; margin-top: 1rem; transition: all .2s; }
   .btn-primary { background: var(--accent); color: #fff; }
   .btn-primary:hover { opacity: .85; }
@@ -1038,6 +1097,7 @@ _WEB_UI_HTML = """<!DOCTYPE html>
   .tabs { display: flex; gap: .5rem; margin-bottom: 1rem; }
   .tab { padding: .5rem 1rem; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; color: var(--dim); font-size: .85rem; }
   .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .param-hint { font-size: .75rem; color: var(--dim); margin-top: .15rem; }
 </style>
 </head>
 <body>
@@ -1053,6 +1113,7 @@ _WEB_UI_HTML = """<!DOCTYPE html>
     </div>
 
     <form id="form" onsubmit="return submitJob(event)">
+      <!-- ── Full Pipeline ── -->
       <div id="tab-full">
         <label for="image">Reference image (PNG/JPG)</label>
         <input type="file" id="image" accept="image/*" onchange="previewImage(this)">
@@ -1061,38 +1122,83 @@ _WEB_UI_HTML = """<!DOCTYPE html>
         <div class="row">
           <div>
             <label for="preset">Quality preset</label>
-            <select id="preset" onchange="onPresetChange()">
-              <option value="low">Low — 10k faces, fast (octree 256, 20 steps)</option>
-              <option value="medium" selected>Medium — 50k faces (octree 384, 30 steps)</option>
-              <option value="high">High — 150k faces (octree 384, 50 steps)</option>
-              <option value="ultra">Ultra — max detail (octree 512, 50 steps, no decimation)</option>
-              <option value="custom">Custom...</option>
+            <select id="preset" onchange="onPresetChange('full')">
+              <option value="low">Low (turbo, 10k, fast)</option>
+              <option value="medium" selected>Medium (turbo, 50k)</option>
+              <option value="high">High (full, 150k)</option>
+              <option value="ultra">Ultra (full, max detail)</option>
             </select>
           </div>
+          <div>
+            <label for="model">Shape model</label>
+            <select id="model"></select>
+            <div class="param-hint">turbo ~1 min | full ~5 min</div>
+          </div>
+        </div>
+
+        <div class="row3">
+          <div>
+            <label for="octree_resolution">Octree resolution</label>
+            <input type="number" id="octree_resolution" value="384" min="128" max="512" step="64">
+            <div class="param-hint">256 / 384 / 512</div>
+          </div>
+          <div>
+            <label for="num_inference_steps">Inference steps</label>
+            <input type="number" id="num_inference_steps" value="20" min="1" max="100" step="5">
+            <div class="param-hint">turbo: 5-10 | full: 30-50</div>
+          </div>
+          <div>
+            <label for="target_faces">Target faces</label>
+            <input type="number" id="target_faces" value="50000" min="0" step="5000">
+            <div class="param-hint">0 = no decimation</div>
+          </div>
+        </div>
+
+        <div class="row">
           <div>
             <label for="subdir">Output subdirectory</label>
             <input type="text" id="subdir" value="web_0" placeholder="e.g. asset_001">
           </div>
         </div>
-        <div id="custom_faces_row" style="display:none">
-          <label for="target_faces">Custom target faces</label>
-          <input type="number" id="target_faces" value="50000" min="0" step="5000">
-        </div>
       </div>
 
+      <!-- ── Shape Only ── -->
       <div id="tab-shape" style="display:none">
         <label for="image_shape">Reference image</label>
         <input type="file" id="image_shape" accept="image/*">
+
         <div class="row">
           <div>
             <label for="preset_shape">Quality preset</label>
-            <select id="preset_shape">
-              <option value="low">Low — 10k faces (fast)</option>
-              <option value="medium" selected>Medium — 50k faces</option>
-              <option value="high">High — 150k faces (detailed)</option>
-              <option value="ultra">Ultra — max detail</option>
+            <select id="preset_shape" onchange="onPresetChange('shape')">
+              <option value="low">Low (turbo, 10k, fast)</option>
+              <option value="medium" selected>Medium (turbo, 50k)</option>
+              <option value="high">High (full, 150k)</option>
+              <option value="ultra">Ultra (full, max detail)</option>
             </select>
           </div>
+          <div>
+            <label for="model_shape">Shape model</label>
+            <select id="model_shape"></select>
+          </div>
+        </div>
+
+        <div class="row3">
+          <div>
+            <label for="octree_resolution_shape">Octree resolution</label>
+            <input type="number" id="octree_resolution_shape" value="384" min="128" max="512" step="64">
+          </div>
+          <div>
+            <label for="num_inference_steps_shape">Inference steps</label>
+            <input type="number" id="num_inference_steps_shape" value="20" min="1" max="100" step="5">
+          </div>
+          <div>
+            <label for="target_faces_shape">Target faces</label>
+            <input type="number" id="target_faces_shape" value="50000" min="0" step="5000">
+          </div>
+        </div>
+
+        <div class="row">
           <div>
             <label for="subdir_shape">Output subdirectory</label>
             <input type="text" id="subdir_shape" value="web_0">
@@ -1100,6 +1206,7 @@ _WEB_UI_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- ── Texture Only ── -->
       <div id="tab-texture" style="display:none">
         <label for="mesh_tex">Mesh file (.glb/.obj)</label>
         <input type="file" id="mesh_tex" accept=".glb,.obj">
@@ -1122,7 +1229,40 @@ _WEB_UI_HTML = """<!DOCTYPE html>
 <script>
 let currentTab = 'full';
 let apiKey = new URLSearchParams(location.search).get('key') || '';
-const PRESETS = {low: 10000, medium: 50000, high: 150000, ultra: 0};
+
+const PRESETS = {
+  low:    { model: 'turbo', octree_resolution: 256, num_inference_steps: 10, target_faces: 10000 },
+  medium: { model: 'turbo', octree_resolution: 384, num_inference_steps: 20, target_faces: 50000 },
+  high:   { model: 'full',  octree_resolution: 384, num_inference_steps: 30, target_faces: 150000 },
+  ultra:  { model: 'full',  octree_resolution: 512, num_inference_steps: 50, target_faces: 0 },
+};
+
+// Populate model dropdowns from server
+async function loadModels() {
+  try {
+    const resp = await fetch('/api/models');
+    const data = await resp.json();
+    const models = data.models || [];
+    ['model', 'model_shape'].forEach(id => {
+      const sel = document.getElementById(id);
+      sel.innerHTML = '';
+      models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        if (m === data.default) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      // If no models found, show a fallback
+      if (models.length === 0) {
+        sel.innerHTML = '<option value="turbo">turbo</option>';
+      }
+    });
+  } catch (e) {
+    console.warn('Could not load models:', e);
+  }
+}
+loadModels();
 
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -1133,13 +1273,17 @@ function switchTab(tab) {
   currentTab = tab;
 }
 
-function onPresetChange() {
-  const sel = document.getElementById('preset');
-  const row = document.getElementById('custom_faces_row');
-  row.style.display = sel.value === 'custom' ? '' : 'none';
-  if (sel.value !== 'custom') {
-    document.getElementById('target_faces').value = PRESETS[sel.value] || 50000;
-  }
+function onPresetChange(tabId) {
+  // Determine suffix for field IDs ('full' has no suffix, 'shape' has '_shape')
+  const suffix = tabId === 'full' ? '' : '_shape';
+  const presetSel = document.getElementById('preset' + suffix);
+  const preset = PRESETS[presetSel.value];
+  if (!preset) return;
+
+  document.getElementById('model' + suffix).value = preset.model;
+  document.getElementById('octree_resolution' + suffix).value = preset.octree_resolution;
+  document.getElementById('num_inference_steps' + suffix).value = preset.num_inference_steps;
+  document.getElementById('target_faces' + suffix).value = preset.target_faces;
 }
 
 function previewImage(input) {
@@ -1185,20 +1329,20 @@ async function submitJob(e) {
     if (!file) { alert('Select an image'); btn.disabled = false; return; }
     formData.append('image', file);
     formData.append('output_subdir', document.getElementById('subdir').value);
-    const preset = document.getElementById('preset').value;
-    if (preset === 'custom') {
-      formData.append('target_faces', document.getElementById('target_faces').value);
-    } else {
-      formData.append('preset', preset);
-    }
+    formData.append('model', document.getElementById('model').value);
+    formData.append('octree_resolution', document.getElementById('octree_resolution').value);
+    formData.append('num_inference_steps', document.getElementById('num_inference_steps').value);
+    formData.append('target_faces', document.getElementById('target_faces').value);
   } else if (currentTab === 'shape') {
     url = '/api/generate-shape';
     const file = document.getElementById('image_shape').files[0];
     if (!file) { alert('Select an image'); btn.disabled = false; return; }
     formData.append('image', file);
     formData.append('output_subdir', document.getElementById('subdir_shape').value);
-    const presetShape = document.getElementById('preset_shape').value;
-    formData.append('preset', presetShape);
+    formData.append('model', document.getElementById('model_shape').value);
+    formData.append('octree_resolution', document.getElementById('octree_resolution_shape').value);
+    formData.append('num_inference_steps', document.getElementById('num_inference_steps_shape').value);
+    formData.append('target_faces', document.getElementById('target_faces_shape').value);
   } else {
     url = '/api/texture-mesh';
     const mf = document.getElementById('mesh_tex').files[0];
@@ -1209,7 +1353,8 @@ async function submitJob(e) {
     formData.append('output_subdir', document.getElementById('subdir_tex').value);
   }
 
-  addLog('Uploading to Vision3D...', '');
+  const params = currentTab !== 'texture' ? ` [${document.getElementById('model' + (currentTab==='shape'?'_shape':'')).value}, octree=${document.getElementById('octree_resolution' + (currentTab==='shape'?'_shape':'')).value}, steps=${document.getElementById('num_inference_steps' + (currentTab==='shape'?'_shape':'')).value}, faces=${document.getElementById('target_faces' + (currentTab==='shape'?'_shape':'')).value}]` : '';
+  addLog('Uploading to Vision3D...' + params, '');
   status.textContent = 'Uploading...';
 
   try {
@@ -1228,16 +1373,15 @@ async function submitJob(e) {
 
     addLog('Job created: ' + job.job_id);
     fill.style.width = '10%';
-    status.textContent = 'Processing... (this takes 5-15 minutes)';
+    status.textContent = 'Processing... (this takes 1-15 minutes depending on model)';
 
-    // Connect SSE
     const streamUrl = '/api/jobs/' + job.job_id + '/stream' + (apiKey ? '?x_api_key='+apiKey : '');
     const es = new EventSource(streamUrl);
 
     let progress = 10;
     es.addEventListener('log', (ev) => {
       const text = ev.data;
-      const cls = text.includes('═══') ? 'phase' : text.includes('COMPLETE') ? 'done' : '';
+      const cls = text.includes('===') || text.includes('═══') ? 'phase' : text.includes('COMPLETE') ? 'done' : '';
       addLog(text, cls);
       progress = Math.min(progress + 3, 90);
       fill.style.width = progress + '%';
@@ -1252,8 +1396,8 @@ async function submitJob(e) {
       fill.style.width = '100%';
       const data = JSON.parse(ev.data);
       status.textContent = data.status === 'completed'
-        ? `Done in ${data.elapsed_s}s`
-        : `Failed: ${data.error || 'unknown'}`;
+        ? 'Done in ' + data.elapsed_s + 's'
+        : 'Failed: ' + (data.error || 'unknown');
 
       if (data.status === 'completed' && data.files) {
         result.style.display = 'block';

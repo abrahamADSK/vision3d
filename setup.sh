@@ -106,7 +106,8 @@ Environment=GPU_API_KEY=$API_KEY
 Environment=GPU_MODELS_DIR=$MODELS_DIR
 Environment=GPU_WORK_DIR=$WORK_DIR
 Environment=GPU_VISION_DIR=$VISION_DIR
-ExecStart=$VENV_DIR/bin/python $VISION_DIR/server.py --host 127.0.0.1 --port $PORT
+Environment=LD_LIBRARY_PATH=$VENV_DIR/lib/python3.9/site-packages/torch/lib
+ExecStart=$VENV_DIR/bin/python $VISION_DIR/server.py --host 0.0.0.0 --port $PORT
 Restart=on-failure
 RestartSec=5
 
