@@ -1144,7 +1144,7 @@ _WEB_UI_HTML = """<!DOCTYPE html>
           </div>
           <div>
             <label for="num_inference_steps">Inference steps</label>
-            <input type="number" id="num_inference_steps" value="20" min="1" max="100" step="5">
+            <input type="number" id="num_inference_steps" value="20" min="1" max="100" step="1">
             <div class="param-hint">turbo: 5-10 | full: 30-50</div>
           </div>
           <div>
@@ -1190,7 +1190,7 @@ _WEB_UI_HTML = """<!DOCTYPE html>
           </div>
           <div>
             <label for="num_inference_steps_shape">Inference steps</label>
-            <input type="number" id="num_inference_steps_shape" value="20" min="1" max="100" step="5">
+            <input type="number" id="num_inference_steps_shape" value="20" min="1" max="100" step="1">
           </div>
           <div>
             <label for="target_faces_shape">Target faces</label>
