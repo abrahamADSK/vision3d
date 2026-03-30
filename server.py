@@ -181,6 +181,26 @@ def _get_shape_pipeline(model_name: str = "turbo"):
     return _shape_pipeline
 
 
+def _unload_shape_pipeline():
+    """Unload shape model from GPU to free VRAM for paint pipeline."""
+    import gc
+    import torch
+    global _shape_pipeline, _shape_pipeline_name
+
+    if _shape_pipeline is None:
+        return
+
+    print(f"[Shape] Unloading {_shape_pipeline_name} to free VRAM for paint...")
+    del _shape_pipeline
+    _shape_pipeline = None
+    _shape_pipeline_name = None
+    gc.collect()
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    print("[Shape] VRAM freed.")
+
+
 def _get_paint_pipeline():
     global _paint_pipeline
     if _paint_pipeline is None:
@@ -419,6 +439,8 @@ def _run_shape_from_text(
     mesh_size_kb = glb_path.stat().st_size // 1024
     _job_log(job_id, f"      Shape saved: mesh.glb ({mesh_size_kb} KB)")
 
+    # Free shape model from VRAM before loading paint
+    _unload_shape_pipeline()
     torch.cuda.empty_cache()
 
     # ── Phase 2: Texturing ───────────────────────────────────────────
@@ -830,6 +852,8 @@ def _run_full_pipeline(
     mesh_size_kb = glb_path.stat().st_size // 1024
     _job_log(job_id, f"      Shape saved: mesh.glb ({mesh_size_kb} KB)")
 
+    # Free shape model from VRAM before loading paint
+    _unload_shape_pipeline()
     torch.cuda.empty_cache()
 
     # ── Phase 2: Texturing ──────────────────────────────────────────

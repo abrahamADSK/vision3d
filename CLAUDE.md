@@ -67,32 +67,42 @@ pipeline(text="...", ...)        # ❌ Error: parámetro no soportado
 
 **Fase 1/3 — Text→Image**:
 1. Prompt enhancement: se añade "isolated object, centered, no floor, no ground, no shadow, white background, studio lighting, photorealistic, clean lines, product photography"
-2. `Flux.1-schnell` (Black Forest Labs) genera imagen 1024×1024 con 4 steps (~10s)
-3. Flux se descarga de VRAM inmediatamente después (`_unload_t2i_pipeline()`) para liberar memoria para las fases siguientes y otras apps (ComfyUI, FaceSwap, etc.)
+2. `SDXL Turbo` (Stability AI) genera imagen 512×512 con 4 steps (~2s), upscale a 1024×1024
+3. SDXL Turbo se descarga de VRAM inmediatamente después (`_unload_t2i_pipeline()`) para liberar memoria
 4. `BackgroundRemover` (rembg) elimina fondo para limpieza
 
 **Fase 2/3 — Shape Generation**:
-4. Imagen limpia → shape pipeline (image-to-3D)
-5. Decimación a `target_faces` (default 10k)
+5. Imagen limpia → shape pipeline (image-to-3D)
+6. Decimación a `target_faces` (default 10k)
+7. Shape pipeline se descarga de VRAM (`_unload_shape_pipeline()`) antes de cargar paint
 
 **Fase 3/3 — Texturing**:
-6. Paint pipeline genera textura usando la imagen de referencia
-7. Salida: `textured.glb`, `mesh_uv.obj`, `texture_baked.png`, `mesh.glb`
+8. Paint pipeline genera textura usando la imagen de referencia
+9. Salida: `textured.glb`, `mesh_uv.obj`, `texture_baked.png`, `mesh.glb`
 
 ### Text-to-Image
-- **Pipeline**: `FluxPipeline` (de `diffusers`) — **Flux.1-schnell** (Black Forest Labs)
-- **Modelo**: `"black-forest-labs/FLUX.1-schnell"` (~12GB en bfloat16)
+- **Pipeline**: `AutoPipelineForText2Image` (de `diffusers`) — **SDXL Turbo** (Stability AI)
+- **Modelo**: `"stabilityai/sdxl-turbo"` (~6GB en fp16)
 - **Descarga automática** en primer uso (vía HuggingFace)
 - **Dependencias**: `diffusers`, `transformers`, `accelerate`, `sentencepiece`, `protobuf`
-- **Gestión de VRAM**: carga bajo demanda (`_load_t2i_pipeline()`), descarga completa después de generar (`_unload_t2i_pipeline()`) — libera VRAM para ComfyUI, FaceSwap, etc.
-- **Parámetros**: 4 inference steps, guidance_scale=0.0, 1024×1024
-- **Velocidad**: ~10s por imagen en RTX 3090
-- **Ventaja sobre HunyuanDiT**: adherencia al prompt muy superior (95% vs 60%), distingue "moderno minimalista" de "clásico ornamentado"
+- **Gestión de VRAM**: carga bajo demanda (`_load_t2i_pipeline()`), descarga completa después de generar (`_unload_t2i_pipeline()`)
+- **Parámetros**: 4 inference steps, guidance_scale=0.0, 512×512 + upscale a 1024×1024
+- **Velocidad**: ~2s por imagen en RTX 3090
+- **Historial**: HunyuanDiT (mala adherencia) → Flux.1-schnell (demasiado pesado, ~33GB) → SDXL Turbo (equilibrio peso/calidad)
 
 ### Paint Model (Textura)
-- **Modelo**: `hunyuan3d-paint-v2-0-turbo`
+- **Modelo**: `hunyuan3d-paint-v2-0-turbo` (~14GB)
+- **Dependencia**: requiere `hunyuan3d-delight-v2-0` (~4GB, modelo de relighting — NO borrar)
 - **Función**: `_run_texture()` en `server.py`
 - Se usa tanto en image-to-3D (full-pipeline) como en text-to-3D
+
+### Gestión de VRAM (CRÍTICO — RTX 3090, 24GB)
+La GPU es compartida con ComfyUI, FaceSwap, FaceFusion, etc. Los modelos NO caben todos a la vez:
+- Shape turbo: ~10GB | Paint turbo: ~14GB | SDXL Turbo: ~6GB
+- **Secuencia obligatoria**: cargar → usar → descargar antes de cargar el siguiente
+- Funciones: `_unload_t2i_pipeline()`, `_unload_shape_pipeline()`
+- Si shape y paint se cargan a la vez, el servidor se cuelga sin error (OOM silencioso)
+- Extensiones CUDA (`custom_rasterizer`, `differentiable_renderer`) deben recompilarse si se actualiza PyTorch
 
 ---
 
@@ -214,7 +224,10 @@ GET /api/presets
 
 ### Solucionados
 - ✅ **text-to-3D crash (CORREGIDO)**: El pipeline de shape no aceptaba `text=`. Ahora se genera imagen intermedia primero.
-- ✅ **HunyuanDiT reemplazado por Flux.1-schnell**: HunyuanDiT tenía mala adherencia al prompt (resultados "toon", ignoraba estilos). Flux.1-schnell ofrece calidad muy superior y libera VRAM al terminar.
+- ✅ **HunyuanDiT reemplazado por SDXL Turbo**: HunyuanDiT tenía mala adherencia al prompt (resultados "toon", ignoraba estilos). Flux.1-schnell era demasiado pesado (~33GB, se colgaba cargando). SDXL Turbo (~6GB) es el equilibrio correcto.
+- ✅ **Paint pipeline se colgaba**: Shape (~10GB) + Paint (~14GB) = 24GB, no cabían juntos. Solución: `_unload_shape_pipeline()` antes de cargar paint.
+- ✅ **custom_rasterizer incompatible con PyTorch 2.5**: Extensión CUDA compilada contra 2.3 tenía `undefined symbol`. Recompilado con `pip install -e .` en `custom_rasterizer/` y `differentiable_renderer/`.
+- ✅ **hunyuan3d-delight-v2-0 es dependencia de paint**: No se puede borrar — lo usa `Light_Shadow_Remover` dentro del paint pipeline.
 - ✅ **pip shebang roto**: El shebang de `.venv/bin/pip` apunta a path antiguo (`vision` en vez de `vision3d`). Usar siempre `.venv/bin/python -m pip`.
 - ✅ **Text-to-3D sin textura + suelo no deseado**: Corregido con rembg + enhanced prompt + paint pipeline completo.
 - ✅ **Job text-to-3D exitoso**: Job `a145c468` completado: HunyuanDiT → shape (226k verts) → decimación (10k faces) → mesh.glb con textura.
