@@ -301,73 +301,139 @@ def _run_shape_from_text(
     num_inference_steps: int = 30,
     model: str = "turbo",
 ) -> dict:
-    """Text → image → 3D shape generation (blocking, runs in thread).
+    """Text → image → 3D shape → texture (blocking, runs in thread).
 
-    The shape pipeline (Hunyuan3DDiTFlowMatchingPipeline) only accepts image=,
-    NOT text=.  For text-to-3D we first generate a reference image using
-    HunyuanDiT (text-to-image), then feed that image to the shape pipeline.
+    Full pipeline:
+    1. HunyuanDiT generates a reference image from text
+    2. Background removal (rembg) to isolate the object
+    3. Shape pipeline generates 3D mesh from the clean image
+    4. Decimation (if target_faces > 0)
+    5. Paint pipeline textures the mesh using the reference image
     """
     import torch
+    from PIL import Image
+    import numpy as np
+    import trimesh
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
-    # ── Step 1: Text → Image via HunyuanDiT ──────────────────────────
-    _job_log(job_id, f"[1/5] Loading text-to-image model (HunyuanDiT)...")
+    # ── Phase 0: Text → Image via HunyuanDiT ─────────────────────────
+    _job_log(job_id, "═══ PHASE 1/3: TEXT TO IMAGE ═══")
+    _job_log(job_id, "[1/8] Loading text-to-image model (HunyuanDiT)...")
     t2i = _get_t2i_pipeline()
 
-    _job_log(job_id, f"[2/5] Generating reference image from text: '{text_prompt}'...")
-    ref_image = t2i(text_prompt)
+    # Enhance prompt for cleaner 3D generation (isolated object, no floor)
+    enhanced_prompt = f"{text_prompt}, isolated object, centered, no floor, no ground, no shadow, white background, studio lighting"
+    _job_log(job_id, f"[2/8] Generating reference image...")
+    _job_log(job_id, f"      Prompt: '{text_prompt}'")
+    _job_log(job_id, f"      Enhanced: '{enhanced_prompt}'")
+    ref_image = t2i(enhanced_prompt)
     if ref_image is None:
         raise RuntimeError(
             f"Text-to-image generation returned None for prompt: '{text_prompt}'. "
             "Check HunyuanDiT model installation."
         )
-    # Save the intermediate image for debugging / reference
+    # Save the raw generated image
     ref_path = output / "text2img_reference.png"
     ref_image.save(str(ref_path))
     _job_log(job_id, f"      Reference image generated: {ref_image.size[0]}x{ref_image.size[1]}")
 
-    # ── Step 2: Image → 3D via shape pipeline ─────────────────────────
-    _job_log(job_id, f"[3/5] Loading shape pipeline ({model})...")
+    # Background removal to isolate the object
+    ref_image = ref_image.convert("RGBA")
+    alpha = np.array(ref_image)[:, :, 3]
+    if (alpha < 10).sum() / alpha.size < 0.05:
+        try:
+            from hy3dgen.rembg import BackgroundRemover
+            _job_log(job_id, "      Removing background (rembg)...")
+            ref_image = BackgroundRemover()(ref_image)
+            # Save the clean image too
+            clean_path = output / "text2img_clean.png"
+            ref_image.save(str(clean_path))
+            _job_log(job_id, "      Background removed successfully")
+        except ImportError:
+            _job_log(job_id, "      WARNING: rembg not available, using raw image")
+
+    # ── Phase 1: Image → 3D shape ────────────────────────────────────
+    _job_log(job_id, "═══ PHASE 2/3: SHAPE GENERATION ═══")
+    _job_log(job_id, f"[3/8] Loading shape pipeline ({model})...")
     pipeline = _get_shape_pipeline(model)
 
-    _job_log(job_id, f"[3/5] Generating 3D shape (octree={octree_resolution}, steps={num_inference_steps})...")
+    _job_log(job_id, f"[4/8] Generating 3D shape (octree={octree_resolution}, steps={num_inference_steps})...")
     result = pipeline(
         image=ref_image,
         octree_resolution=octree_resolution,
         num_inference_steps=num_inference_steps,
     )
     mesh = result[0]
-    _job_log(
-        job_id,
-        f"      Generated: {len(mesh.vertices):,} verts | {len(mesh.faces):,} faces",
-    )
+    orig_faces = len(mesh.faces)
+    _job_log(job_id, f"      Generated: {len(mesh.vertices):,} verts | {orig_faces:,} faces")
 
     # Decimation
-    if target_faces > 0:
-        _job_log(job_id, "[4/5] Decimating mesh...")
-        import trimesh as _tri
-        tri_mesh = _tri.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
+    if target_faces > 0 and orig_faces > target_faces:
+        _job_log(job_id, f"[5/8] Decimating: {orig_faces:,} → {target_faces:,} faces...")
+        tri_mesh = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
         tri_mesh = _decimate_mesh(tri_mesh, target_faces, job_id)
         glb_path = output / "mesh.glb"
         tri_mesh.export(str(glb_path))
+        paint_mesh = tri_mesh
     else:
-        _job_log(job_id, "[4/5] Skipping decimation")
+        _job_log(job_id, "[5/8] Skipping decimation")
+        tri_mesh = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
         glb_path = output / "mesh.glb"
-        mesh.export(str(glb_path))
+        tri_mesh.export(str(glb_path))
+        paint_mesh = tri_mesh
 
-    _job_log(job_id, "[5/5] Saving mesh.glb...")
-    size_kb = glb_path.stat().st_size // 1024
+    mesh_size_kb = glb_path.stat().st_size // 1024
+    _job_log(job_id, f"      Shape saved: mesh.glb ({mesh_size_kb} KB)")
 
     torch.cuda.empty_cache()
 
-    return {
-        "mesh_path": str(glb_path),
-        "mesh_size_kb": size_kb,
-        "output_dir": str(output),
-        "files": ["mesh.glb", "text2img_reference.png"],
-    }
+    # ── Phase 2: Texturing ───────────────────────────────────────────
+    _job_log(job_id, "═══ PHASE 3/3: TEXTURING ═══")
+    _job_log(job_id, "[6/8] Loading paint pipeline...")
+    paint = _get_paint_pipeline()
+
+    _job_log(job_id, "[7/8] Painting texture (~2-5 min)...")
+    textured = paint(paint_mesh, ref_image)
+
+    _job_log(job_id, "[8/8] Saving textured results...")
+    files = ["text2img_reference.png"]
+
+    glb_out = output / "textured.glb"
+    textured.export(str(glb_out))
+    files.append("textured.glb")
+
+    obj_out = output / "mesh_uv.obj"
+    textured.export(str(obj_out))
+    files.append("mesh_uv.obj")
+
+    tex_out = output / "texture_baked.png"
+    tex_saved = False
+    try:
+        mat = textured.visual.material
+        if hasattr(mat, "image") and mat.image is not None:
+            mat.image.save(str(tex_out))
+            tex_saved = True
+    except Exception:
+        pass
+    if not tex_saved:
+        try:
+            tv = textured.visual
+            if hasattr(tv, "to_texture"):
+                tv.to_texture().image.save(str(tex_out))
+                tex_saved = True
+        except Exception:
+            pass
+    if tex_saved:
+        files.append("texture_baked.png")
+
+    files.append("mesh.glb")
+
+    torch.cuda.empty_cache()
+    _job_log(job_id, f"═══ COMPLETE: {len(files)} files ready ═══")
+
+    return {"files": files, "output_dir": str(output)}
 
 
 # ── Quality presets ──────────────────────────────────────────────────────────
