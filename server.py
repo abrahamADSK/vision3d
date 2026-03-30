@@ -1240,8 +1240,6 @@ _WEB_UI_HTML = """<!DOCTYPE html>
     <div class="tabs">
       <div class="tab active" onclick="switchTab('full')">Image → 3D</div>
       <div class="tab" onclick="switchTab('text')">Text → 3D</div>
-      <div class="tab" onclick="switchTab('shape')">Shape Only</div>
-      <div class="tab" onclick="switchTab('texture')">Texture Only</div>
     </div>
 
     <form id="form" onsubmit="return submitJob(event)">
@@ -1343,60 +1341,6 @@ _WEB_UI_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- ── Shape Only ── -->
-      <div id="tab-shape" style="display:none">
-        <label for="image_shape">Reference image</label>
-        <input type="file" id="image_shape" accept="image/*">
-
-        <div class="row">
-          <div>
-            <label for="preset_shape">Quality preset</label>
-            <select id="preset_shape" onchange="onPresetChange('shape')">
-              <option value="low">Low (turbo, 10k, fast)</option>
-              <option value="medium" selected>Medium (turbo, 50k)</option>
-              <option value="high">High (full, 150k)</option>
-              <option value="ultra">Ultra (full, max detail)</option>
-            </select>
-          </div>
-          <div>
-            <label for="model_shape">Shape model</label>
-            <select id="model_shape"></select>
-          </div>
-        </div>
-
-        <div class="row3">
-          <div>
-            <label for="octree_resolution_shape">Octree resolution</label>
-            <input type="number" id="octree_resolution_shape" value="384" min="128" max="512" step="64">
-          </div>
-          <div>
-            <label for="num_inference_steps_shape">Inference steps</label>
-            <input type="number" id="num_inference_steps_shape" value="20" min="1" max="100" step="1">
-          </div>
-          <div>
-            <label for="target_faces_shape">Target faces</label>
-            <input type="number" id="target_faces_shape" value="50000" min="0" step="5000">
-          </div>
-        </div>
-
-        <div class="row">
-          <div>
-            <label for="subdir_shape">Output subdirectory</label>
-            <input type="text" id="subdir_shape" value="web_0">
-          </div>
-        </div>
-      </div>
-
-      <!-- ── Texture Only ── -->
-      <div id="tab-texture" style="display:none">
-        <label for="mesh_tex">Mesh file (.glb/.obj)</label>
-        <input type="file" id="mesh_tex" accept=".glb,.obj">
-        <label for="image_tex">Reference image</label>
-        <input type="file" id="image_tex" accept="image/*">
-        <label for="subdir_tex">Output subdirectory</label>
-        <input type="text" id="subdir_tex" value="web_0">
-      </div>
-
       <button type="submit" class="btn-primary" id="submitBtn">Generate 3D Model</button>
       <div class="progress-bar" id="progressBar"><div class="fill" id="progressFill"></div></div>
       <p class="status" id="statusText"></p>
@@ -1424,7 +1368,7 @@ async function loadModels() {
     const resp = await fetch('/api/models');
     const data = await resp.json();
     const models = data.models || [];
-    ['model', 'model_text', 'model_shape'].forEach(id => {
+    ['model', 'model_text'].forEach(id => {
       const sel = document.getElementById(id);
       sel.innerHTML = '';
       models.forEach(m => {
@@ -1448,7 +1392,7 @@ loadModels();
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelector(`.tab[onclick*="${tab}"]`).classList.add('active');
-  ['full','text','shape','texture'].forEach(t => {
+  ['full','text'].forEach(t => {
     document.getElementById('tab-'+t).style.display = t===tab ? '' : 'none';
   });
   currentTab = tab;
@@ -1524,28 +1468,10 @@ async function submitJob(e) {
     formData.append('octree_resolution', document.getElementById('octree_resolution_text').value);
     formData.append('num_inference_steps', document.getElementById('num_inference_steps_text').value);
     formData.append('target_faces', document.getElementById('target_faces_text').value);
-  } else if (currentTab === 'shape') {
-    url = '/api/generate-shape';
-    const file = document.getElementById('image_shape').files[0];
-    if (!file) { alert('Select an image'); btn.disabled = false; return; }
-    formData.append('image', file);
-    formData.append('output_subdir', document.getElementById('subdir_shape').value);
-    formData.append('model', document.getElementById('model_shape').value);
-    formData.append('octree_resolution', document.getElementById('octree_resolution_shape').value);
-    formData.append('num_inference_steps', document.getElementById('num_inference_steps_shape').value);
-    formData.append('target_faces', document.getElementById('target_faces_shape').value);
-  } else {
-    url = '/api/texture-mesh';
-    const mf = document.getElementById('mesh_tex').files[0];
-    const imf = document.getElementById('image_tex').files[0];
-    if (!mf || !imf) { alert('Select both mesh and image'); btn.disabled = false; return; }
-    formData.append('mesh', mf);
-    formData.append('image', imf);
-    formData.append('output_subdir', document.getElementById('subdir_tex').value);
   }
 
   const sfx = currentTab === 'full' ? '' : '_' + currentTab;
-  const params = currentTab !== 'texture' ? ` [${document.getElementById('model' + sfx).value}, octree=${document.getElementById('octree_resolution' + sfx).value}, steps=${document.getElementById('num_inference_steps' + sfx).value}, faces=${document.getElementById('target_faces' + sfx).value}]` : '';
+  const params = ` [${document.getElementById('model' + sfx).value}, octree=${document.getElementById('octree_resolution' + sfx).value}, steps=${document.getElementById('num_inference_steps' + sfx).value}, faces=${document.getElementById('target_faces' + sfx).value}]`;
   addLog('Uploading to Vision3D...' + params, '');
   status.textContent = 'Uploading...';
 

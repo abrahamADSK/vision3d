@@ -63,20 +63,32 @@ pipeline(text="...", ...)        # ❌ Error: parámetro no soportado
 
 **Problema histórico**: `text-to-3D` crasheaba porque `server.py` intentaba pasar `text=` directamente al shape pipeline, que lo ignoraba, dejando `image=None` → crash en `cv2.resize()`.
 
-**Solución actual**: Para `text-to-3D`:
-1. Generar imagen intermedia con `HunyuanDiTPipeline` (texto → imagen)
-2. Pasar esa imagen al shape pipeline (imagen → malla 3D)
+**Solución actual (3 fases)**: La función `_run_shape_from_text()` implementa un pipeline completo:
 
-Ver función `_run_shape_from_text()` en `server.py`.
+**Fase 1/3 — Text→Image**:
+1. Prompt enhancement: se añade automáticamente "isolated object, centered, no floor, no ground, no shadow, white background, studio lighting"
+2. `HunyuanDiTPipeline` genera imagen 1024×1024 desde el prompt enriquecido
+3. `BackgroundRemover` (rembg) elimina fondo para limpieza
+
+**Fase 2/3 — Shape Generation**:
+4. Imagen limpia → shape pipeline (image-to-3D)
+5. Decimación a `target_faces` (default 10k)
+
+**Fase 3/3 — Texturing**:
+6. Paint pipeline genera textura usando la imagen de referencia
+7. Salida: `textured.glb`, `mesh_uv.obj`, `texture_baked.png`, `mesh.glb`
 
 ### Text-to-Image
 - **Pipeline**: `HunyuanDiTPipeline` (de `hy3dgen.text2image`)
 - **Modelo**: `"Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled"`
 - **Descarga automática** en primer uso (vía HuggingFace)
+- **Dependencias extra**: `sentencepiece`, `protobuf` (para tokenizer T5)
+- **Lazy loading**: `_get_t2i_pipeline()` carga solo cuando se necesita
 
 ### Paint Model (Textura)
 - **Modelo**: `hunyuan3d-paint-v2-0-turbo`
 - **Función**: `_run_texture()` en `server.py`
+- Se usa tanto en image-to-3D (full-pipeline) como en text-to-3D
 
 ---
 
@@ -198,9 +210,13 @@ GET /api/presets
 
 ### Solucionados
 - ✅ **text-to-3D crash (CORREGIDO)**: El pipeline de shape no aceptaba `text=`. Ahora se genera imagen intermedia primero.
+- ✅ **HunyuanDiT funcional**: Confirmado en glorfindel, genera imágenes 1024×1024 correctamente.
+- ✅ **sentencepiece instalado**: Requerido por T5 tokenizer de HunyuanDiT. Instalado con `python -m pip install sentencepiece protobuf`.
+- ✅ **pip shebang roto**: El shebang de `.venv/bin/pip` apunta a path antiguo (`vision` en vez de `vision3d`). Usar siempre `.venv/bin/python -m pip`.
+- ✅ **Text-to-3D sin textura + suelo no deseado**: Corregido con rembg + enhanced prompt + paint pipeline completo.
+- ✅ **Job text-to-3D exitoso**: Job `a145c468` completado: HunyuanDiT → shape (226k verts) → decimación (10k faces) → mesh.glb con textura.
 
 ### Pendientes de Verificación
-- ⚠️ **HunyuanDiT disponible**: Confirmar que `hy3dgen.text2image.HunyuanDiTPipeline` existe en `.venv` de glorfindel y que descarga el modelo correctamente.
 - ⚠️ **Debug print**: `custom_rasterizer/render.py` tiene un `print()` debug pendiente de eliminar en site-packages de glorfindel.
 
 ### Notas Operacionales
@@ -208,6 +224,10 @@ GET /api/presets
 - Código fuente se edita desde Mac local
 - Después de `git pull` en glorfindel: `sudo systemctl daemon-reload && sudo systemctl restart vision3d`
 - Web UI está embebida en `server.py` (HTML inline en endpoint raíz `/`)
+- Web UI tiene 2 tabs: "Image → 3D", "Text → 3D"
+- Tab "Text → 3D" incluye input de prompt, presets, controles de modelo/octree/steps/faces
+- Resultados GLB se muestran en visor 3D interactivo (`<model-viewer>` de Google, orbit controls)
+- Text-to-3D muestra también la imagen de referencia generada
 
 ---
 
@@ -216,7 +236,7 @@ GET /api/presets
 ```
 vision3d (API FastAPI en glorfindel)
     ↑
-    │ HTTP REST
+    │ HTTP REST (port 8000)
     ↓
 maya-mcp (servidor MCP, cliente de Vision3D API)
     ↑
@@ -226,13 +246,13 @@ fpt-mcp (consola Qt, orquesta maya-mcp + ShotGrid)
     ↑
     │ Claude Code CLI
     ↓
-Mac local (~/Developer/Claude_projects/)
+Mac local (~/Claude_projects/)
 ```
 
 **Ubicaciones**:
 - `vision3d`: `/home/flame/ai-studio/vision3d/` (glorfindel)
-- `maya-mcp`: `~/Developer/Claude_projects/maya-mcp/` (Mac)
-- `fpt-mcp`: `~/Developer/Claude_projects/fpt-mcp/` (Mac)
+- `maya-mcp`: `~/Claude_projects/maya-mcp-project/` (Mac)
+- `fpt-mcp`: `~/Claude_projects/fpt-mcp/` (Mac)
 
 **Flujo típico**:
 1. Usuario envía request a `maya-mcp` (MCP server)
@@ -272,7 +292,7 @@ source .venv/bin/activate
 ```
 
 ### Edición de Código
-- Editar en Mac: `~/Developer/Claude_projects/vision3d/`
+- Editar en Mac: `~/Claude_projects/vision3d/`
 - Sincronizar: `git push` → `git pull` en glorfindel
 - Restart: `sudo systemctl restart vision3d`
 
@@ -346,6 +366,38 @@ cat /etc/systemd/system/vision3d.service
 - **API**: `http://localhost:8000/api/...`
 - **Web UI**: `http://localhost:8000/`
 - **Health**: `http://localhost:8000/api/health`
+
+---
+
+## 11. Workflow de Despliegue (para Claude)
+
+Después de editar archivos en Cowork/Mac, el usuario debe ejecutar estos comandos manualmente. Claude debe proporcionarlos siempre que haya cambios pendientes de desplegar.
+
+### Mac — Commit y push de los tres repos
+```bash
+# vision3d
+cd ~/Claude_projects/vision3d
+git add -A && git commit -m "descripción del cambio" && git push
+
+# maya-mcp
+cd ~/Claude_projects/maya-mcp-project
+git add -A && git commit -m "descripción del cambio" && git push
+
+# fpt-mcp
+cd ~/Claude_projects/fpt-mcp
+git add -A && git commit -m "descripción del cambio" && git push
+```
+
+### glorfindel — Pull y restart (solo si se cambió vision3d)
+```bash
+cd ~/ai-studio/vision3d && git pull && sudo systemctl restart vision3d && sudo journalctl -u vision3d -f -n 20
+```
+
+**Notas**:
+- Claude NO tiene acceso SSH a glorfindel — siempre dar comandos al usuario
+- Los repos Mac están en `~/Claude_projects/`, NO `~/Developer/`
+- El repo en glorfindel está en `~/ai-studio/vision3d/`, NO `~/ai-studio/vision/`
+- Usar `.venv/bin/python -m pip` en glorfindel (el shebang de pip está roto)
 
 ---
 
