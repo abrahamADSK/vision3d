@@ -116,9 +116,9 @@ _shape_pipeline_name = None
 _paint_pipeline = None
 _t2i_pipeline = None
 
-# Flux.1-schnell for text-to-image (required for text-to-3D)
-# Superior prompt adherence vs HunyuanDiT, fast (~10s), fully unloadable from VRAM
-T2I_MODEL = "black-forest-labs/FLUX.1-schnell"
+# SDXL Turbo for text-to-image (required for text-to-3D)
+# ~6GB VRAM, 1 step (~2s), good prompt adherence, fully unloadable
+T2I_MODEL = "stabilityai/sdxl-turbo"
 
 # Map user-facing model names to HunyuanD-2 subfolder names
 SHAPE_MODELS = {
@@ -200,27 +200,28 @@ def _get_paint_pipeline():
 
 
 def _load_t2i_pipeline():
-    """Load Flux.1-schnell text-to-image pipeline onto GPU."""
+    """Load SDXL Turbo text-to-image pipeline onto GPU."""
     import torch
     global _t2i_pipeline
 
     if _t2i_pipeline is not None:
         return _t2i_pipeline
 
-    from diffusers import FluxPipeline
+    from diffusers import AutoPipelineForText2Image
 
-    print(f"[T2I] Loading Flux.1-schnell from {T2I_MODEL}...")
-    _t2i_pipeline = FluxPipeline.from_pretrained(
+    print(f"[T2I] Loading SDXL Turbo from {T2I_MODEL}...")
+    _t2i_pipeline = AutoPipelineForText2Image.from_pretrained(
         T2I_MODEL,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.float16,
+        variant="fp16",
     )
-    _t2i_pipeline.enable_model_cpu_offload()
-    print("[T2I] Flux.1-schnell loaded (CPU offload enabled).")
+    _t2i_pipeline.to("cuda")
+    print("[T2I] SDXL Turbo loaded on GPU.")
     return _t2i_pipeline
 
 
 def _unload_t2i_pipeline():
-    """Fully unload Flux from GPU memory to free VRAM for other apps."""
+    """Fully unload SDXL Turbo from GPU memory to free VRAM for other apps."""
     import gc
     import torch
     global _t2i_pipeline
@@ -228,7 +229,7 @@ def _unload_t2i_pipeline():
     if _t2i_pipeline is None:
         return
 
-    print("[T2I] Unloading Flux.1-schnell from memory...")
+    print("[T2I] Unloading SDXL Turbo from memory...")
     _t2i_pipeline.to("cpu")
     del _t2i_pipeline
     _t2i_pipeline = None
@@ -318,7 +319,7 @@ def _run_shape_from_text(
     """Text → image → 3D shape → texture (blocking, runs in thread).
 
     Full pipeline:
-    1. HunyuanDiT generates a reference image from text
+    1. SDXL Turbo generates a reference image from text
     2. Background removal (rembg) to isolate the object
     3. Shape pipeline generates 3D mesh from the clean image
     4. Decimation (if target_faces > 0)
@@ -332,9 +333,9 @@ def _run_shape_from_text(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
-    # ── Phase 0: Text → Image via Flux.1-schnell ───────────────────────
+    # ── Phase 0: Text → Image via SDXL Turbo ────────────────────────────
     _job_log(job_id, "═══ PHASE 1/3: TEXT TO IMAGE ═══")
-    _job_log(job_id, "[1/8] Loading Flux.1-schnell...")
+    _job_log(job_id, "[1/8] Loading SDXL Turbo...")
     t2i = _load_t2i_pipeline()
 
     # Enhance prompt for cleaner 3D generation (isolated object, no floor)
@@ -346,22 +347,24 @@ def _run_shape_from_text(
     _job_log(job_id, f"[2/8] Generating reference image...")
     _job_log(job_id, f"      Prompt: '{text_prompt}'")
     _job_log(job_id, f"      Enhanced: '{enhanced_prompt}'")
-    flux_result = t2i(
+    sdxl_result = t2i(
         prompt=enhanced_prompt,
         num_inference_steps=4,
         guidance_scale=0.0,
-        height=1024,
-        width=1024,
+        height=512,
+        width=512,
     )
-    ref_image = flux_result.images[0]
+    ref_image = sdxl_result.images[0]
     if ref_image is None:
         raise RuntimeError(
             f"Text-to-image generation returned None for prompt: '{text_prompt}'. "
-            "Check Flux.1-schnell installation."
+            "Check SDXL Turbo installation."
         )
+    # Upscale to 1024x1024 for better 3D quality
+    ref_image = ref_image.resize((1024, 1024), Image.LANCZOS)
 
     # Free VRAM before shape generation (shared GPU)
-    _job_log(job_id, "      Unloading Flux to free VRAM...")
+    _job_log(job_id, "      Unloading SDXL Turbo to free VRAM...")
     _unload_t2i_pipeline()
     # Save the raw generated image
     ref_path = output / "text2img_reference.png"
@@ -930,10 +933,10 @@ async def health():
     info["models"] = _get_available_models()
     # Check if text-to-image module is available
     try:
-        from diffusers import FluxPipeline  # noqa: F401
-        info["text_to_3d"] = "available (Flux.1-schnell)"
+        from diffusers import AutoPipelineForText2Image  # noqa: F401
+        info["text_to_3d"] = "available (SDXL Turbo)"
     except ImportError:
-        info["text_to_3d"] = "unavailable (diffusers FluxPipeline not found)"
+        info["text_to_3d"] = "unavailable (diffusers not found)"
     return info
 
 
