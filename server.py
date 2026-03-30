@@ -1216,6 +1216,8 @@ _WEB_UI_HTML = """<!DOCTYPE html>
   .log-line.done { color: var(--ok); font-weight: bold; }
   .log-line.error { color: var(--fail); }
   #result { display: none; margin-top: 1rem; }
+  #viewer3d { width: 100%; height: 400px; border-radius: 8px; background: #1a1d27; margin-top: 1rem; display: none; }
+  #refImage { max-width: 200px; border-radius: 8px; margin-top: .5rem; }
   .file-link { display: inline-block; padding: .5rem 1rem; margin: .3rem; background: var(--accent); color: #fff; border-radius: 6px; text-decoration: none; font-size: .85rem; }
   .file-link:hover { opacity: .8; }
   .progress-bar { height: 4px; background: var(--border); border-radius: 2px; margin-top: .5rem; overflow: hidden; display: none; }
@@ -1227,15 +1229,17 @@ _WEB_UI_HTML = """<!DOCTYPE html>
   .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
   .param-hint { font-size: .75rem; color: var(--dim); margin-top: .15rem; }
 </style>
+<script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js"></script>
 </head>
 <body>
 <div class="container">
   <h1>Vision3D</h1>
-  <p class="subtitle">Image-to-3D generation with AI texturing</p>
+  <p class="subtitle">AI-powered 3D generation from images or text</p>
 
   <div class="card">
     <div class="tabs">
-      <div class="tab active" onclick="switchTab('full')">Full Pipeline</div>
+      <div class="tab active" onclick="switchTab('full')">Image → 3D</div>
+      <div class="tab" onclick="switchTab('text')">Text → 3D</div>
       <div class="tab" onclick="switchTab('shape')">Shape Only</div>
       <div class="tab" onclick="switchTab('texture')">Texture Only</div>
     </div>
@@ -1286,6 +1290,55 @@ _WEB_UI_HTML = """<!DOCTYPE html>
           <div>
             <label for="subdir">Output subdirectory</label>
             <input type="text" id="subdir" value="web_0" placeholder="e.g. asset_001">
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Text to 3D ── -->
+      <div id="tab-text" style="display:none">
+        <label for="text_prompt">Text prompt (describe the object)</label>
+        <input type="text" id="text_prompt" placeholder="e.g. a realistic wooden mailbox, a medieval sword, a cute robot">
+        <div class="param-hint">The prompt is automatically enhanced for better 3D results (isolated object, white background, etc.)</div>
+
+        <div class="row">
+          <div>
+            <label for="preset_text">Quality preset</label>
+            <select id="preset_text" onchange="onPresetChange('text')">
+              <option value="low">Low (turbo, 10k, fast)</option>
+              <option value="medium" selected>Medium (turbo, 50k)</option>
+              <option value="high">High (full, 150k)</option>
+              <option value="ultra">Ultra (full, max detail)</option>
+            </select>
+          </div>
+          <div>
+            <label for="model_text">Shape model</label>
+            <select id="model_text"></select>
+            <div class="param-hint">turbo ~1 min | full ~5 min</div>
+          </div>
+        </div>
+
+        <div class="row3">
+          <div>
+            <label for="octree_resolution_text">Octree resolution</label>
+            <input type="number" id="octree_resolution_text" value="384" min="128" max="512" step="64">
+            <div class="param-hint">256 / 384 / 512</div>
+          </div>
+          <div>
+            <label for="num_inference_steps_text">Inference steps</label>
+            <input type="number" id="num_inference_steps_text" value="20" min="1" max="100" step="1">
+            <div class="param-hint">turbo: 5-10 | full: 30-50</div>
+          </div>
+          <div>
+            <label for="target_faces_text">Target faces</label>
+            <input type="number" id="target_faces_text" value="50000" min="0" step="5000">
+            <div class="param-hint">0 = no decimation</div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="subdir_text">Output subdirectory</label>
+            <input type="text" id="subdir_text" value="web_text_0" placeholder="e.g. text_asset_001">
           </div>
         </div>
       </div>
@@ -1371,7 +1424,7 @@ async function loadModels() {
     const resp = await fetch('/api/models');
     const data = await resp.json();
     const models = data.models || [];
-    ['model', 'model_shape'].forEach(id => {
+    ['model', 'model_text', 'model_shape'].forEach(id => {
       const sel = document.getElementById(id);
       sel.innerHTML = '';
       models.forEach(m => {
@@ -1395,7 +1448,7 @@ loadModels();
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelector(`.tab[onclick*="${tab}"]`).classList.add('active');
-  ['full','shape','texture'].forEach(t => {
+  ['full','text','shape','texture'].forEach(t => {
     document.getElementById('tab-'+t).style.display = t===tab ? '' : 'none';
   });
   currentTab = tab;
@@ -1403,7 +1456,7 @@ function switchTab(tab) {
 
 function onPresetChange(tabId) {
   // Determine suffix for field IDs ('full' has no suffix, 'shape' has '_shape')
-  const suffix = tabId === 'full' ? '' : '_shape';
+  const suffix = tabId === 'full' ? '' : '_' + tabId;
   const presetSel = document.getElementById('preset' + suffix);
   const preset = PRESETS[presetSel.value];
   if (!preset) return;
@@ -1461,6 +1514,16 @@ async function submitJob(e) {
     formData.append('octree_resolution', document.getElementById('octree_resolution').value);
     formData.append('num_inference_steps', document.getElementById('num_inference_steps').value);
     formData.append('target_faces', document.getElementById('target_faces').value);
+  } else if (currentTab === 'text') {
+    url = '/api/generate-text';
+    const prompt = document.getElementById('text_prompt').value.trim();
+    if (!prompt) { alert('Enter a text prompt'); btn.disabled = false; return; }
+    formData.append('text_prompt', prompt);
+    formData.append('output_subdir', document.getElementById('subdir_text').value);
+    formData.append('model', document.getElementById('model_text').value);
+    formData.append('octree_resolution', document.getElementById('octree_resolution_text').value);
+    formData.append('num_inference_steps', document.getElementById('num_inference_steps_text').value);
+    formData.append('target_faces', document.getElementById('target_faces_text').value);
   } else if (currentTab === 'shape') {
     url = '/api/generate-shape';
     const file = document.getElementById('image_shape').files[0];
@@ -1481,7 +1544,8 @@ async function submitJob(e) {
     formData.append('output_subdir', document.getElementById('subdir_tex').value);
   }
 
-  const params = currentTab !== 'texture' ? ` [${document.getElementById('model' + (currentTab==='shape'?'_shape':'')).value}, octree=${document.getElementById('octree_resolution' + (currentTab==='shape'?'_shape':'')).value}, steps=${document.getElementById('num_inference_steps' + (currentTab==='shape'?'_shape':'')).value}, faces=${document.getElementById('target_faces' + (currentTab==='shape'?'_shape':'')).value}]` : '';
+  const sfx = currentTab === 'full' ? '' : '_' + currentTab;
+  const params = currentTab !== 'texture' ? ` [${document.getElementById('model' + sfx).value}, octree=${document.getElementById('octree_resolution' + sfx).value}, steps=${document.getElementById('num_inference_steps' + sfx).value}, faces=${document.getElementById('target_faces' + sfx).value}]` : '';
   addLog('Uploading to Vision3D...' + params, '');
   status.textContent = 'Uploading...';
 
@@ -1529,7 +1593,23 @@ async function submitJob(e) {
 
       if (data.status === 'completed' && data.files) {
         result.style.display = 'block';
-        result.innerHTML = '<h3 style="margin-bottom:.5rem">Download Results:</h3>';
+        result.innerHTML = '';
+
+        // 3D viewer — prefer textured.glb, fallback to mesh.glb
+        const glbFile = data.files.find(f => f === 'textured.glb') || data.files.find(f => f.endsWith('.glb'));
+        if (glbFile) {
+          const viewerUrl = '/api/jobs/' + job.job_id + '/files/' + glbFile;
+          result.innerHTML += `<model-viewer id="viewer3d" src="${viewerUrl}" auto-rotate camera-controls touch-action="pan-y" style="display:block" shadow-intensity="1" exposure="1.2"></model-viewer>`;
+        }
+
+        // Show reference image for text-to-3D
+        const refImg = data.files.find(f => f === 'text2img_reference.png');
+        if (refImg) {
+          result.innerHTML += `<p style="color:var(--dim);font-size:.85rem;margin-top:.5rem">Reference image generated from text:</p><img id="refImage" src="/api/jobs/${job.job_id}/files/${refImg}">`;
+        }
+
+        // Download links
+        result.innerHTML += '<h3 style="margin:.8rem 0 .5rem">Download:</h3>';
         data.files.forEach(f => {
           const a = document.createElement('a');
           a.href = '/api/jobs/' + job.job_id + '/files/' + f;
@@ -1538,7 +1618,7 @@ async function submitJob(e) {
           a.download = f;
           result.appendChild(a);
         });
-        addLog('All files ready for download!', 'done');
+        addLog('All files ready!', 'done');
       } else {
         addLog('Job failed: ' + (data.error || 'unknown'), 'error');
       }
