@@ -116,8 +116,9 @@ _shape_pipeline_name = None
 _paint_pipeline = None
 _t2i_pipeline = None
 
-# HunyuanDiT model for text-to-image (required for text-to-3D)
-T2I_MODEL = "Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled"
+# Flux.1-schnell for text-to-image (required for text-to-3D)
+# Superior prompt adherence vs HunyuanDiT, fast (~10s), fully unloadable from VRAM
+T2I_MODEL = "black-forest-labs/FLUX.1-schnell"
 
 # Map user-facing model names to HunyuanD-2 subfolder names
 SHAPE_MODELS = {
@@ -198,28 +199,44 @@ def _get_paint_pipeline():
     return _paint_pipeline
 
 
-def _get_t2i_pipeline():
-    """Load text-to-image pipeline (HunyuanDiT). Required for text-to-3D."""
+def _load_t2i_pipeline():
+    """Load Flux.1-schnell text-to-image pipeline onto GPU."""
     import torch
     global _t2i_pipeline
 
     if _t2i_pipeline is not None:
         return _t2i_pipeline
 
-    try:
-        from hy3dgen.text2image import HunyuanDiTPipeline
-    except ImportError:
-        raise RuntimeError(
-            "text2image module not found. Text-to-3D requires "
-            "hy3dgen.text2image (HunyuanDiTPipeline). "
-            "Make sure Hunyuan3D-2 is fully installed."
-        )
+    from diffusers import FluxPipeline
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[T2I] Loading HunyuanDiT from {T2I_MODEL} on {device}...")
-    _t2i_pipeline = HunyuanDiTPipeline(T2I_MODEL, device=device)
-    print("[T2I] HunyuanDiT loaded successfully.")
+    print(f"[T2I] Loading Flux.1-schnell from {T2I_MODEL}...")
+    _t2i_pipeline = FluxPipeline.from_pretrained(
+        T2I_MODEL,
+        torch_dtype=torch.bfloat16,
+    )
+    _t2i_pipeline.enable_model_cpu_offload()
+    print("[T2I] Flux.1-schnell loaded (CPU offload enabled).")
     return _t2i_pipeline
+
+
+def _unload_t2i_pipeline():
+    """Fully unload Flux from GPU memory to free VRAM for other apps."""
+    import gc
+    import torch
+    global _t2i_pipeline
+
+    if _t2i_pipeline is None:
+        return
+
+    print("[T2I] Unloading Flux.1-schnell from memory...")
+    _t2i_pipeline.to("cpu")
+    del _t2i_pipeline
+    _t2i_pipeline = None
+    gc.collect()
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    print("[T2I] VRAM freed.")
 
 
 # ── Inference functions (run in thread pool) ─────────────────────────────────
@@ -315,22 +332,37 @@ def _run_shape_from_text(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
-    # ── Phase 0: Text → Image via HunyuanDiT ─────────────────────────
+    # ── Phase 0: Text → Image via Flux.1-schnell ───────────────────────
     _job_log(job_id, "═══ PHASE 1/3: TEXT TO IMAGE ═══")
-    _job_log(job_id, "[1/8] Loading text-to-image model (HunyuanDiT)...")
-    t2i = _get_t2i_pipeline()
+    _job_log(job_id, "[1/8] Loading Flux.1-schnell...")
+    t2i = _load_t2i_pipeline()
 
     # Enhance prompt for cleaner 3D generation (isolated object, no floor)
-    enhanced_prompt = f"{text_prompt}, isolated object, centered, no floor, no ground, no shadow, white background, studio lighting"
+    enhanced_prompt = (
+        f"{text_prompt}, isolated object, centered, no floor, no ground, "
+        "no shadow, white background, studio lighting, photorealistic, "
+        "clean lines, product photography"
+    )
     _job_log(job_id, f"[2/8] Generating reference image...")
     _job_log(job_id, f"      Prompt: '{text_prompt}'")
     _job_log(job_id, f"      Enhanced: '{enhanced_prompt}'")
-    ref_image = t2i(enhanced_prompt)
+    flux_result = t2i(
+        prompt=enhanced_prompt,
+        num_inference_steps=4,
+        guidance_scale=0.0,
+        height=1024,
+        width=1024,
+    )
+    ref_image = flux_result.images[0]
     if ref_image is None:
         raise RuntimeError(
             f"Text-to-image generation returned None for prompt: '{text_prompt}'. "
-            "Check HunyuanDiT model installation."
+            "Check Flux.1-schnell installation."
         )
+
+    # Free VRAM before shape generation (shared GPU)
+    _job_log(job_id, "      Unloading Flux to free VRAM...")
+    _unload_t2i_pipeline()
     # Save the raw generated image
     ref_path = output / "text2img_reference.png"
     ref_image.save(str(ref_path))
@@ -898,10 +930,10 @@ async def health():
     info["models"] = _get_available_models()
     # Check if text-to-image module is available
     try:
-        from hy3dgen.text2image import HunyuanDiTPipeline  # noqa: F401
-        info["text_to_3d"] = "available (HunyuanDiT)"
+        from diffusers import FluxPipeline  # noqa: F401
+        info["text_to_3d"] = "available (Flux.1-schnell)"
     except ImportError:
-        info["text_to_3d"] = "unavailable (hy3dgen.text2image not found)"
+        info["text_to_3d"] = "unavailable (diffusers FluxPipeline not found)"
     return info
 
 

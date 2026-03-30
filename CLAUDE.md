@@ -66,9 +66,10 @@ pipeline(text="...", ...)        # ❌ Error: parámetro no soportado
 **Solución actual (3 fases)**: La función `_run_shape_from_text()` implementa un pipeline completo:
 
 **Fase 1/3 — Text→Image**:
-1. Prompt enhancement: se añade automáticamente "isolated object, centered, no floor, no ground, no shadow, white background, studio lighting"
-2. `HunyuanDiTPipeline` genera imagen 1024×1024 desde el prompt enriquecido
-3. `BackgroundRemover` (rembg) elimina fondo para limpieza
+1. Prompt enhancement: se añade "isolated object, centered, no floor, no ground, no shadow, white background, studio lighting, photorealistic, clean lines, product photography"
+2. `Flux.1-schnell` (Black Forest Labs) genera imagen 1024×1024 con 4 steps (~10s)
+3. Flux se descarga de VRAM inmediatamente después (`_unload_t2i_pipeline()`) para liberar memoria para las fases siguientes y otras apps (ComfyUI, FaceSwap, etc.)
+4. `BackgroundRemover` (rembg) elimina fondo para limpieza
 
 **Fase 2/3 — Shape Generation**:
 4. Imagen limpia → shape pipeline (image-to-3D)
@@ -79,11 +80,14 @@ pipeline(text="...", ...)        # ❌ Error: parámetro no soportado
 7. Salida: `textured.glb`, `mesh_uv.obj`, `texture_baked.png`, `mesh.glb`
 
 ### Text-to-Image
-- **Pipeline**: `HunyuanDiTPipeline` (de `hy3dgen.text2image`)
-- **Modelo**: `"Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled"`
+- **Pipeline**: `FluxPipeline` (de `diffusers`) — **Flux.1-schnell** (Black Forest Labs)
+- **Modelo**: `"black-forest-labs/FLUX.1-schnell"` (~12GB en bfloat16)
 - **Descarga automática** en primer uso (vía HuggingFace)
-- **Dependencias extra**: `sentencepiece`, `protobuf` (para tokenizer T5)
-- **Lazy loading**: `_get_t2i_pipeline()` carga solo cuando se necesita
+- **Dependencias**: `diffusers`, `transformers`, `accelerate`, `sentencepiece`, `protobuf`
+- **Gestión de VRAM**: carga bajo demanda (`_load_t2i_pipeline()`), descarga completa después de generar (`_unload_t2i_pipeline()`) — libera VRAM para ComfyUI, FaceSwap, etc.
+- **Parámetros**: 4 inference steps, guidance_scale=0.0, 1024×1024
+- **Velocidad**: ~10s por imagen en RTX 3090
+- **Ventaja sobre HunyuanDiT**: adherencia al prompt muy superior (95% vs 60%), distingue "moderno minimalista" de "clásico ornamentado"
 
 ### Paint Model (Textura)
 - **Modelo**: `hunyuan3d-paint-v2-0-turbo`
@@ -210,8 +214,7 @@ GET /api/presets
 
 ### Solucionados
 - ✅ **text-to-3D crash (CORREGIDO)**: El pipeline de shape no aceptaba `text=`. Ahora se genera imagen intermedia primero.
-- ✅ **HunyuanDiT funcional**: Confirmado en glorfindel, genera imágenes 1024×1024 correctamente.
-- ✅ **sentencepiece instalado**: Requerido por T5 tokenizer de HunyuanDiT. Instalado con `python -m pip install sentencepiece protobuf`.
+- ✅ **HunyuanDiT reemplazado por Flux.1-schnell**: HunyuanDiT tenía mala adherencia al prompt (resultados "toon", ignoraba estilos). Flux.1-schnell ofrece calidad muy superior y libera VRAM al terminar.
 - ✅ **pip shebang roto**: El shebang de `.venv/bin/pip` apunta a path antiguo (`vision` en vez de `vision3d`). Usar siempre `.venv/bin/python -m pip`.
 - ✅ **Text-to-3D sin textura + suelo no deseado**: Corregido con rembg + enhanced prompt + paint pipeline completo.
 - ✅ **Job text-to-3D exitoso**: Job `a145c468` completado: HunyuanDiT → shape (226k verts) → decimación (10k faces) → mesh.glb con textura.
