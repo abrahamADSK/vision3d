@@ -7,10 +7,8 @@
 # What it does:
 #   1. Installs FastAPI + uvicorn into the existing venv
 #   2. Generates a random API key (saved to .api_key)
-#   3. Installs Caddy (if not present)
-#   4. Creates a systemd service for the Vision3D server
-#   5. Creates a systemd service for Caddy
-#   6. Prints the config values to use on the Mac
+#   3. Creates a systemd service for the Vision3D server
+#   4. Prints the config values to use on the Mac
 
 set -euo pipefail
 
@@ -22,7 +20,6 @@ VENV_DIR="${GPU_VENV:-$VISION_DIR/.venv}"
 WORK_DIR="${GPU_WORK_DIR:-$VISION_DIR/output}"
 MODELS_DIR="${GPU_MODELS_DIR:-$VISION_DIR/hf_models}"
 PORT=8000
-CADDY_PORT=9443
 HOSTNAME=$(hostname)
 
 echo "═══════════════════════════════════════════════════════════"
@@ -38,7 +35,7 @@ echo ""
 
 # ── 1. Install Python dependencies ──────────────────────────────────────────
 
-echo "[1/5] Installing FastAPI + uvicorn..."
+echo "[1/3] Installing FastAPI + uvicorn..."
 if [ -f "$VENV_DIR/bin/pip" ]; then
     "$VENV_DIR/bin/pip" install --quiet fastapi uvicorn python-multipart
     echo "      Done."
@@ -50,7 +47,7 @@ fi
 
 # ── 2. Generate API key ─────────────────────────────────────────────────────
 
-echo "[2/5] Generating API key..."
+echo "[2/3] Generating API key..."
 API_KEY_FILE="$VISION_DIR/.api_key"
 if [ -f "$API_KEY_FILE" ]; then
     API_KEY=$(cat "$API_KEY_FILE")
@@ -62,35 +59,9 @@ else
     echo "      New key saved to $API_KEY_FILE"
 fi
 
-# ── 3. Install Caddy ────────────────────────────────────────────────────────
+# ── 3. Create systemd service ───────────────────────────────────────────────
 
-echo "[3/5] Checking Caddy..."
-if command -v caddy &>/dev/null; then
-    echo "      Caddy already installed: $(caddy version)"
-else
-    echo "      Installing Caddy..."
-    if command -v dnf &>/dev/null; then
-        sudo dnf install -y 'dnf-command(copr)'
-        sudo dnf copr enable -y @caddy/caddy
-        sudo dnf install -y caddy
-    elif command -v apt-get &>/dev/null; then
-        sudo apt-get update
-        sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
-        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-        sudo apt-get update
-        sudo apt-get install -y caddy
-    else
-        echo "ERROR: Could not detect package manager. Install Caddy manually:"
-        echo "  https://caddyserver.com/docs/install"
-        exit 1
-    fi
-    echo "      Caddy installed: $(caddy version)"
-fi
-
-# ── 4. Create systemd service for Vision3D server ─────────────────────────────────
-
-echo "[4/5] Creating systemd service..."
+echo "[3/3] Creating systemd service..."
 
 SERVICE_FILE="/etc/systemd/system/vision3d.service"
 sudo tee "$SERVICE_FILE" > /dev/null <<UNIT
@@ -117,33 +88,12 @@ UNIT
 
 echo "      Created $SERVICE_FILE"
 
-# ── 5. Configure Caddy ──────────────────────────────────────────────────────
-
-echo "[5/5] Configuring Caddy..."
-
-CADDY_DIR="/etc/caddy"
-sudo mkdir -p "$CADDY_DIR" /var/log/caddy
-
-sudo tee "$CADDY_DIR/Caddyfile" > /dev/null <<CADDY
-https://$HOSTNAME:$CADDY_PORT {
-    tls internal
-    reverse_proxy localhost:$PORT
-    log {
-        output file /var/log/caddy/vision3d.log
-        format console
-    }
-}
-CADDY
-
-echo "      Caddyfile written to $CADDY_DIR/Caddyfile"
-
 # ── Enable and start ─────────────────────────────────────────────────────────
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now vision3d.service
-sudo systemctl enable --now caddy.service
 
-# Wait a moment for services to start
+# Wait a moment for service to start
 sleep 2
 
 echo ""
@@ -151,24 +101,18 @@ echo "════════════════════════�
 echo " Setup complete!"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
-echo " Vision3D:    http://localhost:$PORT/api/health"
-echo " Caddy HTTPS: https://$HOSTNAME:$CADDY_PORT/api/health"
+echo " Vision3D:  http://$HOSTNAME:$PORT/api/health"
 echo ""
-echo " API Key:     $API_KEY"
+echo " API Key:   $API_KEY"
 echo ""
 echo " ── Mac configuration (~/.claude.json) ──"
 echo " Set these env vars in maya-mcp:"
-echo ""
-echo "   GPU_API_URL=https://$HOSTNAME:$CADDY_PORT"
-echo "   GPU_API_KEY=$API_KEY"
-echo ""
-echo " Or for direct HTTP (no TLS, LAN only):"
 echo ""
 echo "   GPU_API_URL=http://$HOSTNAME:$PORT"
 echo "   GPU_API_KEY=$API_KEY"
 echo ""
 echo " ── Quick test ──"
-echo "   curl -k https://$HOSTNAME:$CADDY_PORT/api/health"
+echo "   curl http://$HOSTNAME:$PORT/api/health"
 echo ""
 
 # Verify health

@@ -14,11 +14,8 @@ Endpoints:
     GET  /api/jobs/{job_id}     — job status + download
 
 Usage:
-    # Direct (development)
     .venv/bin/python server.py --port 8000
-
-    # Production (behind Caddy)
-    .venv/bin/python server.py --host 127.0.0.1 --port 8000
+    .venv/bin/python server.py --host 0.0.0.0 --port 8000  # LAN access
 
 Environment:
     GPU_API_KEY       — API key for authentication (empty = open access)

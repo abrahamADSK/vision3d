@@ -85,7 +85,7 @@ Open `http://YOUR_GPU_HOST:8000` in a browser.
 sudo bash setup.sh
 ```
 
-This creates a `vision3d.service` that starts on boot, generates an API key, and optionally configures Caddy for HTTPS.
+This creates a `vision3d.service` that starts on boot and generates an API key.
 
 ## API Endpoints
 
