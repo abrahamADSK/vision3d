@@ -19,6 +19,10 @@ Built on [Hunyuan3D-2](https://github.com/Tencent/Hunyuan3D-2) (Tencent) for sha
 - NVIDIA GPU with 16+ GB VRAM (tested on RTX 3090, 24 GB)
 - Python 3.10+
 - [Hunyuan3D-2](https://github.com/Tencent/Hunyuan3D-2) installed in a venv with model weights downloaded
+- [SDXL Turbo](https://huggingface.co/stabilityai/sdxl-turbo) (~6 GB, auto-downloaded on first text-to-3D use)
+- `diffusers`, `transformers`, `accelerate` (for SDXL Turbo text-to-image)
+- `rembg` + `onnxruntime` (background removal for text-to-3D)
+- See [requirements.txt](requirements.txt) for the full dependency list
 
 ## Quick Start
 
