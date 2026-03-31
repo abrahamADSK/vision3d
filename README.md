@@ -2,12 +2,12 @@
 
 AI-powered 3D model generation server. Turns images (or text prompts) into textured 3D meshes using GPU inference.
 
-Built on [Hunyuan3D-2](https://github.com/Tencent/Hunyuan3D-2) by Tencent, exposed as a REST API with a web UI, real-time progress streaming, and automatic polygon decimation.
+Built on [Hunyuan3D-2](https://github.com/Tencent/Hunyuan3D-2) (Tencent) for shape and texture generation, and [SDXL Turbo](https://huggingface.co/stabilityai/sdxl-turbo) (Stability AI) for the intermediate image generation step in the text-to-3D flow. Exposed as a REST API with a web UI, real-time progress streaming, and automatic polygon decimation.
 
 ## Features
 
 - **Image-to-3D**: Upload a reference image, get a textured 3D model (`.glb`, `.obj` + baked texture)
-- **Text-to-3D**: Describe an object in English, get a 3D mesh
+- **Text-to-3D**: Describe an object in English, get a 3D mesh (uses SDXL Turbo as intermediate step)
 - **Full pipeline**: Shape generation + decimation + texturing in one call
 - **Polygon decimation**: Reduce dense meshes to a target face count (default 50k)
 - **Real-time progress**: Server-Sent Events (SSE) stream for live feedback
@@ -47,7 +47,9 @@ The paint pipeline depends on a C++ extension that must be compiled from source:
 .venv/bin/pip install ./Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer
 ```
 
-### 4. Download model weights (~10 GB)
+### 4. Download model weights
+
+**Hunyuan3D-2** (~10 GB — shape and texture generation):
 
 ```bash
 .venv/bin/python -c "
@@ -59,16 +61,14 @@ snapshot_download('tencent/Hunyuan3D-2', allow_patterns='hunyuan3d-paint-v2-0-tu
 
 Move or symlink the downloaded weights into `hf_models/` inside the vision3d directory, or set `GPU_MODELS_DIR` to point at wherever they were downloaded.
 
+**SDXL Turbo** (~6 GB — required for text-to-3D):
+
+Downloaded automatically from HuggingFace on first text-to-3D use. No manual action needed. The model is cached in `~/.cache/huggingface/`.
+
 ### 5. Install Vision3D dependencies
 
 ```bash
-.venv/bin/pip install -r requirements.txt
-```
-
-For better polygon decimation (recommended):
-
-```bash
-.venv/bin/pip install pyfqmr
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
 ### 6. Run
@@ -96,7 +96,7 @@ This creates a `vision3d.service` that starts on boot and generates an API key.
 | `GET` | `/api/presets` | List available quality presets |
 | `POST` | `/api/generate-full` | Full pipeline: image → shape → decimate → texture |
 | `POST` | `/api/generate-shape` | Image → mesh (shape only) |
-| `POST` | `/api/generate-text` | Text prompt → mesh |
+| `POST` | `/api/generate-text` | Text prompt → mesh (uses SDXL Turbo + Hunyuan3D-2) |
 | `POST` | `/api/texture-mesh` | Mesh + image → textured mesh |
 | `GET` | `/api/jobs/{id}` | Poll job status |
 | `GET` | `/api/jobs/{id}/stream` | SSE real-time progress |
@@ -112,8 +112,6 @@ Each preset controls both the generation quality (mesh resolution, inference ste
 | `medium` | 50k | 384 | 30 | General use (default) |
 | `high` | 150k | 384 | 50 | Detailed models |
 | `ultra` | no limit | 512 | 50 | Maximum geometric detail |
-
-Higher `octree_resolution` produces finer surface detail (edges, spikes, creases). Higher `num_inference_steps` improves shape accuracy but takes longer.
 
 ### Example: Full pipeline with curl
 
@@ -158,6 +156,7 @@ Browser / MCP client / curl
           │
    ┌──────▼──────┐
    │ Hunyuan3D-2 │  Shape generation (DiT)
+   │ + SDXL Turbo│  Text → image (text-to-3D)
    │  pipelines  │  Texture painting
    └──────┬──────┘
           │
@@ -166,9 +165,18 @@ Browser / MCP client / curl
    └─────────────┘
 ```
 
+## Models used
+
+| Model | Source | Size | Function |
+|-------|--------|------|----------|
+| `hunyuan3d-dit-v2-0-turbo` | Tencent/Hunyuan3D-2 | ~400 MB | 3D shape generation |
+| `hunyuan3d-paint-v2-0-turbo` | Tencent/Hunyuan3D-2 | ~14 GB | Texture painting |
+| `hunyuan3d-delight-v2-0` | Tencent/Hunyuan3D-2 | ~4 GB | Relighting (paint dependency) |
+| `sdxl-turbo` | Stability AI | ~6 GB | Text → image (intermediate step) |
+
 ## Integration with maya-mcp
 
-Vision3D is designed to work standalone or as the GPU backend for [maya-mcp](https://github.com/abrahamADSK/maya-mcp-project). In that setup, maya-mcp calls Vision3D's API to generate 3D assets and imports them into Autodesk Maya.
+Vision3D works standalone or as the GPU backend for [maya-mcp](https://github.com/abrahamADSK/maya-mcp). In that setup, maya-mcp calls Vision3D's API to generate 3D assets and imports them into Autodesk Maya.
 
 ## License
 

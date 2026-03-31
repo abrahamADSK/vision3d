@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# setup.sh — Install and configure the GPU inference API server.
+# setup.sh — Install and configure the Vision3D server on the GPU machine.
 #
-# Run this on the GPU machine:
+# Run on the GPU machine:
 #   bash setup.sh
 #
 # What it does:
-#   1. Installs FastAPI + uvicorn into the existing venv
+#   1. Installs all dependencies from requirements.txt into the venv
 #   2. Generates a random API key (saved to .api_key)
-#   3. Creates a systemd service for the Vision3D server
+#   3. Creates a systemd service for Vision3D
 #   4. Prints the config values to use on the Mac
 
 set -euo pipefail
@@ -35,13 +35,13 @@ echo ""
 
 # ── 1. Install Python dependencies ──────────────────────────────────────────
 
-echo "[1/3] Installing FastAPI + uvicorn..."
+echo "[1/3] Installing Vision3D dependencies..."
 if [ -f "$VENV_DIR/bin/pip" ]; then
-    "$VENV_DIR/bin/pip" install --quiet fastapi uvicorn python-multipart
+    "$VENV_DIR/bin/python" -m pip install --quiet -r "$SCRIPT_DIR/requirements.txt"
     echo "      Done."
 else
     echo "ERROR: venv not found at $VENV_DIR"
-    echo "Create it first: python3 -m venv $VENV_DIR && $VENV_DIR/bin/pip install -r requirements.txt"
+    echo "Create it first: python3 -m venv $VENV_DIR && $VENV_DIR/bin/python -m pip install -r requirements.txt"
     exit 1
 fi
 
@@ -77,7 +77,7 @@ Environment=GPU_API_KEY=$API_KEY
 Environment=GPU_MODELS_DIR=$MODELS_DIR
 Environment=GPU_WORK_DIR=$WORK_DIR
 Environment=GPU_VISION_DIR=$VISION_DIR
-Environment=LD_LIBRARY_PATH=$VENV_DIR/lib/python3.9/site-packages/torch/lib
+Environment=LD_LIBRARY_PATH=$VENV_DIR/lib/python3.10/site-packages/torch/lib
 ExecStart=$VENV_DIR/bin/python $VISION_DIR/server.py --host 0.0.0.0 --port $PORT
 Restart=on-failure
 RestartSec=5
@@ -93,7 +93,7 @@ echo "      Created $SERVICE_FILE"
 sudo systemctl daemon-reload
 sudo systemctl enable --now vision3d.service
 
-# Wait a moment for service to start
+# Wait for service to start
 sleep 2
 
 echo ""
@@ -118,7 +118,7 @@ echo ""
 # Verify health
 echo "Verifying..."
 if curl -sf "http://localhost:$PORT/api/health" > /dev/null 2>&1; then
-    echo "✓ Vision3D server is running"
+    echo "Vision3D server is running"
 else
-    echo "⚠ Vision3D server may still be starting — check: systemctl status vision3d"
+    echo "Vision3D server may still be starting — check: systemctl status vision3d"
 fi

@@ -1,6 +1,25 @@
-# Vision3D API dependencies (in addition to Hunyuan3D-2)
+# Vision3D — API server dependencies
+# (Hunyuan3D-2 and its dependencies are installed separately via pip install -e)
+
+# ── Web server ──
 fastapi>=0.115.0
 uvicorn>=0.30.0
 python-multipart>=0.0.9
-sse-starlette>=1.6.0          # Server-Sent Events support
-pyfqmr>=0.2.0                 # Fast quadric mesh reduction (optional but recommended)
+sse-starlette>=1.6.0
+
+# ── Text-to-3D (SDXL Turbo) ──
+diffusers>=0.27.0
+transformers>=4.38.0
+accelerate>=0.27.0
+
+# ── Image and mesh processing ──
+Pillow>=10.0.0
+trimesh>=4.0.0
+numpy>=1.24.0
+
+# ── Background removal (text-to-3D) ──
+rembg>=2.0.50
+onnxruntime>=1.17.0
+
+# ── Mesh decimation (optional but recommended) ──
+pyfqmr>=0.2.0

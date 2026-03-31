@@ -1,145 +1,137 @@
-# Vision3D — Contexto Crítico para Claude
+# Vision3D — Critical Context for Claude
 
-## 1. Arquitectura
-
-**Vision3D** es un servidor FastAPI que corre en la máquina GPU **glorfindel** (Rocky Linux) y expone una REST API para generación de modelos 3D usando **Hunyuan3D-2** (Tencent).
-
-El servidor implementa tres pipelines principales:
-- **image-to-3D** (`/api/generate-shape`): Convierte una imagen en malla 3D
-- **text-to-3D** (`/api/generate-text`): Convierte un prompt de texto en malla 3D
-- **texture painting** (`/api/texture-mesh`): Agrega textura a una malla existente
-- **full-pipeline** (`/api/full-pipeline`): Combina shape + texture en un solo llamado
+> **Last updated**: 2026-04-01
 
 ---
 
-## 2. Entorno de Ejecución
+## 1. Architecture
 
-### Máquina GPU
-- **Servidor**: `glorfindel` (GPU con CUDA, Rocky Linux)
-- **Usuario**: root (vía systemd)
-- **Directorio de trabajo**: `/home/flame/ai-studio/vision3d/`
+**Vision3D** is a FastAPI server running on GPU machine **glorfindel** (Rocky Linux), exposing a REST API for 3D model generation using **Hunyuan3D-2** (Tencent) and **SDXL Turbo** (Stability AI).
 
-### Estructura de directorios en glorfindel
+Four main endpoints:
+- **image-to-3D** (`/api/generate-shape`): Image → 3D mesh
+- **text-to-3D** (`/api/generate-text`): Text prompt → intermediate image (SDXL Turbo) → 3D mesh
+- **texture painting** (`/api/texture-mesh`): Mesh + image → textured mesh
+- **full-pipeline** (`/api/generate-full`): Image → shape + decimation + texture in one call
+
+---
+
+## 2. Execution Environment
+
+### GPU Machine
+- **Server**: `glorfindel` (GPU with CUDA, Rocky Linux)
+- **User**: root (via systemd)
+- **Working directory**: `/home/flame/ai-studio/vision3d/`
+
+### Directory structure on glorfindel
 ```
 ~/ai-studio/vision3d/
 ├── .venv/                          # Virtual environment
-├── server.py                        # Servidor FastAPI
-├── hy3dgen/                         # Código Vision3D local
-├── Hunyuan3D-2/                     # Clone git de Tencent/Hunyuan3D-2
-└── hf_models/                       # Modelos descargados
-    ├── hunyuan3d-dit-v2-0-turbo/   # ~400 MB, ~1 min generación
+├── server.py                        # FastAPI server
+├── hy3dgen/                         # Local Hunyuan3D-2 code
+├── Hunyuan3D-2/                     # Tencent/Hunyuan3D-2 git clone
+└── hf_models/                       # Downloaded models
+    ├── hunyuan3d-dit-v2-0-turbo/   # ~400 MB, ~1 min generation
     ├── hunyuan3d-dit-v2-0-fast/    # ~1 GB, ~2-3 min
-    ├── hunyuan3d-dit-v2-0/         # ~3 GB, ~5 min (full quality)
-    └── hunyuan3d-paint-v2-0-turbo/ # Modelo de textura
+    ├── hunyuan3d-dit-v2-0/         # ~3 GB, ~5 min (max quality)
+    └── hunyuan3d-paint-v2-0-turbo/ # ~14 GB, texture model
 ```
 
-### Systemd Service
-- **Archivo**: `/etc/systemd/system/vision3d.service`
-- **Reiniciar**: `sudo systemctl daemon-reload && sudo systemctl restart vision3d`
-- **Ver logs**: `sudo journalctl -u vision3d -f`
+### Systemd service
+- **File**: `/etc/systemd/system/vision3d.service`
+- **Restart**: `sudo systemctl daemon-reload && sudo systemctl restart vision3d`
+- **Logs**: `sudo journalctl -u vision3d -f`
 
 ---
 
-## 3. Pipelines y Modelos
+## 3. Pipelines and Models
 
-### Shape Models (Generación de Geometría)
+### Shape Models
 
-La generación de geometría utiliza `Hunyuan3DDiTFlowMatchingPipeline` de Tencent/Hunyuan3D-2.
+Geometry generation via `Hunyuan3DDiTFlowMatchingPipeline` from Tencent/Hunyuan3D-2.
 
-**Modelos disponibles** (por velocidad/calidad):
-| Modelo | Tiempo | Steps | Parámetros | Uso |
-|--------|--------|-------|-----------|-----|
-| `turbo` | ~1 min | 5-10 | Fast inference | Prototipado rápido |
-| `fast` | ~2-3 min | 15-20 | Balance | Iteraciones |
-| `full` | ~5 min | 30-50 | Máxima calidad | Renders finales |
+| Model | Time | Steps | Use case |
+|-------|------|-------|----------|
+| `turbo` | ~1 min | 5-10 | Quick prototyping |
+| `fast` | ~2-3 min | 15-20 | Iterations |
+| `full` | ~5 min | 30-50 | Final renders |
 
-### ⚠️ CRÍTICO: Parámetros del Shape Pipeline
-
+**CRITICAL**: The shape pipeline ONLY accepts `image=`, NEVER `text=`:
 ```python
-# Shape pipeline SOLO acepta image=, NUNCA text=
-pipeline(image=pil_image, ...)  # ✅ Correcto
-pipeline(text="...", ...)        # ❌ Error: parámetro no soportado
+pipeline(image=pil_image, ...)  # Correct
+pipeline(text="...", ...)        # Error: unsupported parameter
 ```
 
-**Problema histórico**: `text-to-3D` crasheaba porque `server.py` intentaba pasar `text=` directamente al shape pipeline, que lo ignoraba, dejando `image=None` → crash en `cv2.resize()`.
+### Text-to-3D (3-phase pipeline)
 
-**Solución actual (3 fases)**: La función `_run_shape_from_text()` implementa un pipeline completo:
+`_run_shape_from_text()` implements:
 
-**Fase 1/3 — Text→Image**:
-1. Prompt enhancement: se añade "isolated object, centered, no floor, no ground, no shadow, white background, studio lighting, photorealistic, clean lines, product photography"
-2. `SDXL Turbo` (Stability AI) genera imagen 512×512 con 4 steps (~2s), upscale a 1024×1024
-3. SDXL Turbo se descarga de VRAM inmediatamente después (`_unload_t2i_pipeline()`) para liberar memoria
-4. `BackgroundRemover` (rembg) elimina fondo para limpieza
+**Phase 1/3 — Text → Image**:
+1. Automatic prompt enhancement (white background, studio lighting, centered)
+2. **SDXL Turbo** generates 512x512 image with 4 steps (~2s), upscaled to 1024x1024
+3. SDXL Turbo unloaded from VRAM immediately (`_unload_t2i_pipeline()`)
+4. `BackgroundRemover` (rembg) removes background
 
-**Fase 2/3 — Shape Generation**:
-5. Imagen limpia → shape pipeline (image-to-3D)
-6. Decimación a `target_faces` (default 10k)
-7. Shape pipeline se descarga de VRAM (`_unload_shape_pipeline()`) antes de cargar paint
+**Phase 2/3 — Shape Generation**:
+5. Clean image → shape pipeline (image-to-3D)
+6. Decimation to `target_faces`
+7. Shape pipeline unloaded from VRAM (`_unload_shape_pipeline()`)
 
-**Fase 3/3 — Texturing**:
-8. Paint pipeline genera textura usando la imagen de referencia
-9. Salida: `textured.glb`, `mesh_uv.obj`, `texture_baked.png`, `mesh.glb`
+**Phase 3/3 — Texturing**:
+8. Paint pipeline generates texture using reference image
+9. Output: `textured.glb`, `mesh_uv.obj`, `texture_baked.png`, `mesh.glb`
 
-### Text-to-Image
-- **Pipeline**: `AutoPipelineForText2Image` (de `diffusers`) — **SDXL Turbo** (Stability AI)
-- **Modelo**: `"stabilityai/sdxl-turbo"` (~6GB en fp16)
-- **Descarga automática** en primer uso (vía HuggingFace)
-- **Dependencias**: `diffusers`, `transformers`, `accelerate`, `sentencepiece`, `protobuf`
-- **Gestión de VRAM**: carga bajo demanda (`_load_t2i_pipeline()`), descarga completa después de generar (`_unload_t2i_pipeline()`)
-- **Parámetros**: 4 inference steps, guidance_scale=0.0, 512×512 + upscale a 1024×1024
-- **Velocidad**: ~2s por imagen en RTX 3090
-- **Historial**: HunyuanDiT (mala adherencia) → Flux.1-schnell (demasiado pesado, ~33GB) → SDXL Turbo (equilibrio peso/calidad)
+### Text-to-image model
+- **Pipeline**: `AutoPipelineForText2Image` (from `diffusers`) — **SDXL Turbo**
+- **Model**: `stabilityai/sdxl-turbo` (~6 GB in fp16)
+- **Auto-downloaded** on first use (via HuggingFace)
+- **Dependencies**: `diffusers`, `transformers`, `accelerate`
+- **VRAM management**: loaded on demand, fully unloaded after generation
+- **Parameters**: 4 inference steps, guidance_scale=0.0, 512x512 + upscale to 1024x1024
 
-### Paint Model (Textura)
-- **Modelo**: `hunyuan3d-paint-v2-0-turbo` (~14GB)
-- **Dependencia**: requiere `hunyuan3d-delight-v2-0` (~4GB, modelo de relighting — NO borrar)
-- **Función**: `_run_texture()` en `server.py`
-- Se usa tanto en image-to-3D (full-pipeline) como en text-to-3D
+### Paint model (Texture)
+- **Model**: `hunyuan3d-paint-v2-0-turbo` (~14 GB)
+- **Dependency**: requires `hunyuan3d-delight-v2-0` (~4 GB, relighting model — DO NOT delete)
+- Used in both image-to-3D (full-pipeline) and text-to-3D
 
-### Gestión de VRAM (CRÍTICO — RTX 3090, 24GB)
-La GPU es compartida con ComfyUI, FaceSwap, FaceFusion, etc. Los modelos NO caben todos a la vez:
-- Shape turbo: ~10GB | Paint turbo: ~14GB | SDXL Turbo: ~6GB
-- **Secuencia obligatoria**: cargar → usar → descargar antes de cargar el siguiente
-- Funciones: `_unload_t2i_pipeline()`, `_unload_shape_pipeline()`
-- Si shape y paint se cargan a la vez, el servidor se cuelga sin error (OOM silencioso)
-- Extensiones CUDA (`custom_rasterizer`, `differentiable_renderer`) deben recompilarse si se actualiza PyTorch
+### VRAM Management (CRITICAL — RTX 3090, 24 GB)
+GPU is shared. Models do NOT fit simultaneously:
+- Shape turbo: ~10 GB | Paint turbo: ~14 GB | SDXL Turbo: ~6 GB
+- **Mandatory sequence**: load → use → unload before loading next
+- If shape and paint loaded together: silent OOM
+- CUDA extensions (`custom_rasterizer`, `differentiable_renderer`) must be recompiled if PyTorch is updated
 
 ---
 
 ## 4. Quality Presets
 
-La función `_resolve_preset()` en `server.py` mapea `quality` → configuración:
+`_resolve_preset()` in `server.py` maps `quality` → config:
 
-| Preset | Modelo | Octree | Steps | Caras máx | Uso |
-|--------|--------|--------|-------|-----------|-----|
+| Preset | Model | Octree | Steps | Max faces | Use case |
+|--------|-------|--------|-------|-----------|----------|
 | `low` | turbo | 256 | 10 | 10k | Web preview |
-| `medium` | turbo | 384 | 20 | 50k | Uso estándar |
-| `high` | full | 384 | 30 | 150k | Alta calidad |
-| `ultra` | full | 512 | 50 | sin límite | Producción |
+| `medium` | turbo | 384 | 20 | 50k | Standard use |
+| `high` | full | 384 | 30 | 150k | High quality |
+| `ultra` | full | 512 | 50 | no limit | Production |
 
 ---
 
-## 5. REST API Endpoints
+## 5. REST API
 
-### Generación de Forma
+### Shape Generation
 ```
 POST /api/generate-shape
 Content-Type: multipart/form-data
 
-Parámetros:
-  - image: archivo PNG/JPG
+Parameters:
+  - image: PNG/JPG file
   - model: "turbo" | "fast" | "full" (default: "turbo")
   - quality: "low" | "medium" | "high" | "ultra"
-  - steps: número de pasos (sobrescribe quality)
-  - seed: semilla para reproducibilidad (default: aleatorio)
-
-Respuesta:
-  {
-    "job_id": "uuid-string",
-    "status": "processing"
-  }
+  - steps: inference steps (overrides quality)
+  - seed: seed for reproducibility (default: random)
 ```
 
+### Text Generation
 ```
 POST /api/generate-text
 Content-Type: application/json
@@ -150,68 +142,38 @@ Content-Type: application/json
   "quality": "low" | "medium" | "high" | "ultra",
   "seed": int (optional)
 }
-
-Respuesta:
-  {
-    "job_id": "uuid-string",
-    "status": "processing"
-  }
 ```
 
-### Texturizado
+### Texturing
 ```
 POST /api/texture-mesh
 Content-Type: multipart/form-data
 
-Parámetros:
-  - mesh: archivo .glb (malla 3D)
-  - image: archivo PNG/JPG (para textura)
-
-Respuesta:
-  {
-    "job_id": "uuid-string",
-    "status": "processing"
-  }
+Parameters:
+  - mesh: .glb file (3D mesh)
+  - image: PNG/JPG file (texture reference)
 ```
 
-### Pipeline Completo
+### Full Pipeline
 ```
-POST /api/full-pipeline
+POST /api/generate-full
 Content-Type: multipart/form-data
 
-Parámetros:
-  - image: archivo PNG/JPG
+Parameters:
+  - image: PNG/JPG file
   - model: "turbo" | "fast" | "full"
   - quality: preset
-  - texture_image: imagen para textura (opcional)
-
-Respuesta:
-  {
-    "job_id": "uuid-string",
-    "status": "processing"
-  }
+  - texture_image: texture image (optional)
 ```
 
-### Status y Descarga
+### Status and Download
 ```
 GET /api/jobs/{job_id}
-Respuesta:
-  {
-    "job_id": "uuid",
-    "status": "processing" | "completed" | "failed",
-    "progress": 0-100,
-    "files": ["mesh.glb", "preview.png", ...],
-    "error": "mensaje si failed"
-  }
-
 GET /api/jobs/{job_id}/files/{filename}
-Descarga archivo de salida
-
 GET /api/jobs/{job_id}/stream  (SSE)
-Stream de eventos en tiempo real
 ```
 
-### Información
+### Info
 ```
 GET /api/health
 GET /api/models
@@ -220,202 +182,76 @@ GET /api/presets
 
 ---
 
-## 6. Bugs Conocidos y Notas
+## 6. Operational Notes
 
-### Solucionados
-- ✅ **text-to-3D crash (CORREGIDO)**: El pipeline de shape no aceptaba `text=`. Ahora se genera imagen intermedia primero.
-- ✅ **HunyuanDiT reemplazado por SDXL Turbo**: HunyuanDiT tenía mala adherencia al prompt (resultados "toon", ignoraba estilos). Flux.1-schnell era demasiado pesado (~33GB, se colgaba cargando). SDXL Turbo (~6GB) es el equilibrio correcto.
-- ✅ **Paint pipeline se colgaba**: Shape (~10GB) + Paint (~14GB) = 24GB, no cabían juntos. Solución: `_unload_shape_pipeline()` antes de cargar paint.
-- ✅ **custom_rasterizer incompatible con PyTorch 2.5**: Extensión CUDA compilada contra 2.3 tenía `undefined symbol`. Recompilado con `pip install -e .` en `custom_rasterizer/` y `differentiable_renderer/`.
-- ✅ **hunyuan3d-delight-v2-0 es dependencia de paint**: No se puede borrar — lo usa `Light_Shadow_Remover` dentro del paint pipeline.
-- ✅ **pip shebang roto**: El shebang de `.venv/bin/pip` apunta a path antiguo (`vision` en vez de `vision3d`). Usar siempre `.venv/bin/python -m pip`.
-- ✅ **Text-to-3D sin textura + suelo no deseado**: Corregido con rembg + enhanced prompt + paint pipeline completo.
-- ✅ **Job text-to-3D exitoso**: Job `a145c468` completado: HunyuanDiT → shape (226k verts) → decimación (10k faces) → mesh.glb con textura.
-
-### Pendientes de Verificación
-- ⚠️ **Debug print**: `custom_rasterizer/render.py` tiene un `print()` debug pendiente de eliminar en site-packages de glorfindel.
-
-### Notas Operacionales
-- El servidor corre como **root** vía systemd
-- Código fuente se edita desde Mac local
-- Después de `git pull` en glorfindel: `sudo systemctl daemon-reload && sudo systemctl restart vision3d`
-- Web UI está embebida en `server.py` (HTML inline en endpoint raíz `/`)
-- Web UI tiene 2 tabs: "Image → 3D", "Text → 3D"
-- Tab "Text → 3D" incluye input de prompt, presets, controles de modelo/octree/steps/faces
-- Resultados GLB se muestran en visor 3D interactivo (`<model-viewer>` de Google, orbit controls)
-- Text-to-3D muestra también la imagen de referencia generada
+- Server runs as **root** via systemd
+- Source code edited from local Mac
+- After `git pull` on glorfindel: `sudo systemctl daemon-reload && sudo systemctl restart vision3d`
+- Web UI embedded in `server.py` (inline HTML at root endpoint `/`)
+- Web UI has 2 tabs: "Image → 3D" and "Text → 3D"
+- GLB results displayed in interactive 3D viewer (`<model-viewer>`, orbit controls)
+- Use `.venv/bin/python -m pip` on glorfindel (pip's shebang may be broken)
 
 ---
 
-## 7. Integración con Otros Proyectos
+## 7. Integration with Other Projects
 
 ```
-vision3d (API FastAPI en glorfindel)
+vision3d (FastAPI on glorfindel)
     ↑
     │ HTTP REST (port 8000)
     ↓
-maya-mcp (servidor MCP, cliente de Vision3D API)
+maya-mcp (MCP server, Vision3D API client)
     ↑
-    │ MCP protocol
+    │ MCP protocol (stdio)
     ↓
-fpt-mcp (consola Qt, orquesta maya-mcp + ShotGrid)
-    ↑
-    │ Claude Code CLI
-    ↓
-Mac local (~/Claude_projects/)
+Claude Code / Claude Desktop (local Mac)
 ```
 
-**Ubicaciones**:
+**Locations**:
 - `vision3d`: `/home/flame/ai-studio/vision3d/` (glorfindel)
 - `maya-mcp`: `~/Claude_projects/maya-mcp-project/` (Mac)
 - `fpt-mcp`: `~/Claude_projects/fpt-mcp/` (Mac)
 
-**Flujo típico**:
-1. Usuario envía request a `maya-mcp` (MCP server)
-2. `maya-mcp` llama `POST /api/generate-shape` (Vision3D)
-3. Vision3D procesa en GPU, devuelve `job_id`
-4. `maya-mcp` espera a `GET /api/jobs/{job_id}` (polling o SSE)
-5. Resultado descargado y cargado en Maya
-
 ---
 
-## 8. Desarrollo y Debugging
+## 8. Development and Deployment
 
-### Workflows Típicos
-
-**Después de git pull en glorfindel**:
+### After git pull on glorfindel
 ```bash
-# SSH en glorfindel
 ssh glorfindel
-
-# Reload y restart del servicio
-sudo systemctl daemon-reload && sudo systemctl restart vision3d
-
-# Ver logs
-sudo journalctl -u vision3d -f
-```
-
-**Desarrollo local (en glorfindel)**:
-```bash
-cd ~/ai-studio/vision3d/
-source .venv/bin/activate
-
-# Test directo
-.venv/bin/python server.py --port 8000
-
-# Con opciones
-.venv/bin/python server.py --host 127.0.0.1 --port 8000 --reload
-```
-
-### Edición de Código
-- Editar en Mac: `~/Claude_projects/vision3d/`
-- Sincronizar: `git push` → `git pull` en glorfindel
-- Restart: `sudo systemctl restart vision3d`
-
-### Environment Variables (en glorfindel)
-```bash
-GPU_API_KEY=""           # API key (vacío = acceso abierto)
-GPU_MODELS_DIR="./hf_models"
-GPU_WORK_DIR="./output"
-GPU_VISION_DIR="."
-```
-
-### Estructura del Código (server.py)
-
-**Funciones principales**:
-- `_get_shape_pipeline(model)` — Cargar shape model
-- `_get_paint_pipeline()` — Cargar paint model
-- `_get_t2i_pipeline()` — Cargar text-to-image model
-- `_run_shape_from_image()` — Procesar image-to-3D
-- `_run_shape_from_text()` — Procesar text-to-3D (con intermediate image)
-- `_run_texture()` — Aplicar textura a malla
-- `_run_full_pipeline()` — Shape + texture en un paso
-- `_decimate_mesh()` — Reducir número de polígonos
-
-**Job Management**:
-- `_new_job(type, detail)` — Crear nuevo job con UUID
-- `_job_log(job_id, msg)` — Registrar evento
-- `_job_done(job_id, output_dir, files)` — Marcar como completado
-- `_job_fail(job_id, error)` — Marcar como fallido
-
----
-
-## 9. Puntos Clave para Recordar
-
-1. **text-to-3D necesita imagen intermedia**: No pases `text=` directamente al shape pipeline.
-2. **Shape models son stateful**: Cargarlos es caro. Se cachean en `_SHAPE_PIPELINES`.
-3. **GPU tiene límite de memoria**: Preset `ultra` puede requerir 24GB+ VRAM.
-4. **Systemd maneja el ciclo de vida**: No usar `kill -9`, usar `systemctl restart`.
-5. **Logs son importantes**: `journalctl -u vision3d -f` es tu mejor amigo para debugging.
-6. **API key es opcional**: En desarrollo puedes dejar `GPU_API_KEY=""` (acceso abierto).
-7. **Output está en `GPU_WORK_DIR`**: Por defecto `./output`, organizado por `job_id`.
-8. **Web UI está en raíz**: Acceder a `http://glorfindel:8000/` para UI HTML interactiva.
-
----
-
-## 10. Referencias Rápidas
-
-### Archivo Principal
-- `/home/flame/ai-studio/vision3d/server.py`
-
-### Directorios Críticos
-- Modelos: `~/ai-studio/vision3d/hf_models/`
-- Código Hunyuan: `~/ai-studio/vision3d/Hunyuan3D-2/`
-- Output: `~/ai-studio/vision3d/output/{job_id}/`
-
-### Comandos Frecuentes
-```bash
-# Restart del servidor
-sudo systemctl restart vision3d
-
-# Ver logs en tiempo real
-sudo journalctl -u vision3d -f -n 100
-
-# Verificar estado
-systemctl status vision3d
-
-# Ver config del servicio
-cat /etc/systemd/system/vision3d.service
-```
-
-### URLs Locales (en glorfindel)
-- **API**: `http://localhost:8000/api/...`
-- **Web UI**: `http://localhost:8000/`
-- **Health**: `http://localhost:8000/api/health`
-
----
-
-## 11. Workflow de Despliegue (para Claude)
-
-Después de editar archivos en Cowork/Mac, el usuario debe ejecutar estos comandos manualmente. Claude debe proporcionarlos siempre que haya cambios pendientes de desplegar.
-
-### Mac — Commit y push de los tres repos
-```bash
-# vision3d
-cd ~/Claude_projects/vision3d
-git add -A && git commit -m "descripción del cambio" && git push
-
-# maya-mcp
-cd ~/Claude_projects/maya-mcp-project
-git add -A && git commit -m "descripción del cambio" && git push
-
-# fpt-mcp
-cd ~/Claude_projects/fpt-mcp
-git add -A && git commit -m "descripción del cambio" && git push
-```
-
-### glorfindel — Pull y restart (solo si se cambió vision3d)
-```bash
 cd ~/ai-studio/vision3d && git pull && sudo systemctl restart vision3d && sudo journalctl -u vision3d -f -n 20
 ```
 
-**Notas**:
-- Claude NO tiene acceso SSH a glorfindel — siempre dar comandos al usuario
-- Los repos Mac están en `~/Claude_projects/`, NO `~/Developer/`
-- El repo en glorfindel está en `~/ai-studio/vision3d/`, NO `~/ai-studio/vision/`
-- Usar `.venv/bin/python -m pip` en glorfindel (el shebang de pip está roto)
+### Local development (on glorfindel)
+```bash
+cd ~/ai-studio/vision3d/
+.venv/bin/python server.py --port 8000
+```
+
+### Code Structure (server.py)
+
+**Main functions**:
+- `_get_shape_pipeline(model)` — Load shape model
+- `_get_paint_pipeline()` — Load paint model
+- `_load_t2i_pipeline()` — Load SDXL Turbo
+- `_unload_t2i_pipeline()` — Unload SDXL Turbo from VRAM
+- `_unload_shape_pipeline()` — Unload shape model from VRAM
+- `_run_shape_from_image()` — Process image-to-3D
+- `_run_shape_from_text()` — Process text-to-3D (3 phases)
+- `_run_texture()` — Apply texture to mesh
+- `_run_full_pipeline()` — Shape + texture in one step
+- `_decimate_mesh()` — Reduce polygon count
 
 ---
 
-**Última actualización**: 2026-03-30
-**Versión del servidor**: FastAPI + Hunyuan3D-2 (Tencent)
+## 9. Key Points to Remember
+
+1. **text-to-3D needs an intermediate image**: Never pass `text=` directly to the shape pipeline.
+2. **Shape models are stateful**: Loading is expensive. Cached in `_shape_pipeline`.
+3. **GPU has memory limits**: `ultra` preset may require 24 GB+ VRAM.
+4. **Systemd manages the lifecycle**: Don't use `kill -9`, use `systemctl restart`.
+5. **API key is optional**: Leave `GPU_API_KEY=""` for open access during development.
+6. **Output in `GPU_WORK_DIR`**: Defaults to `./output`, organized by `job_id`.
+7. **SDXL Turbo auto-downloads**: First text-to-3D run downloads ~6 GB.
+8. **Text-to-3D dependencies**: `diffusers`, `transformers`, `accelerate` must be in the venv.
