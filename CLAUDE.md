@@ -483,7 +483,7 @@ cd ~/ai-studio/vision3d/
 8. **SDXL Turbo auto-downloads**: First text-to-3D run downloads ~6 GB from HuggingFace.
 9. **Text-to-3D dependencies**: `diffusers`, `transformers`, `accelerate` must be in the venv.
 10. **Jobs are in-memory**: All job state is lost on server restart.
-11. **No concurrent job protection**: Multiple simultaneous GPU jobs will cause OOM.
+11. **GPU concurrency protected**: `asyncio.Semaphore(1)` prevents concurrent GPU jobs (HTTP 429 if busy).
 12. **generate-text uses Form data**: NOT JSON — all params are multipart/form-data.
 13. **generate-full default is 50k faces**: Unlike generate-shape (default 0), generate-full defaults to 50,000 target_faces.
 
@@ -491,15 +491,15 @@ cd ~/ai-studio/vision3d/
 
 ## 12. Known Issues and Potential Bugs
 
-1. **`_resolve_preset` target_faces override bug**: Line 539 — `if target_faces >= 0 and not preset:` means explicit `target_faces` is **ignored** when a `preset` is also provided, because `not preset` evaluates False. To override target_faces with a preset, this condition needs fixing.
+1. ~~**`_resolve_preset` target_faces override bug**~~: **FIXED (Phase 8.1)** — Changed condition to `if target_faces > 0:` so explicit target_faces overrides preset value. Preset default is kept only when target_faces is 0 or not provided.
 
 2. **No job cleanup / memory leak**: `_jobs` dict grows forever. Long-running server accumulates jobs in memory with no TTL or eviction. Includes full log history per job.
 
-3. **No concurrent job protection**: Nothing prevents launching multiple GPU jobs simultaneously. With 24 GB VRAM, two concurrent pipelines will cause silent OOM or CUDA errors.
+3. ~~**No concurrent job protection**~~: **FIXED (Phase 8.1)** — Added `asyncio.Semaphore(1)` (`_gpu_semaphore`). All POST endpoints call `_check_gpu_available()` upfront; returns HTTP 429 with `Retry-After: 30` if GPU is busy. The semaphore is held for the full duration of `_run_in_background()`.
 
 4. **SSE auth bypass from Web UI**: The SSE endpoint expects `x_api_key` as an HTTP header, but `EventSource` (used by the Web UI) does not support custom headers. The Web UI appends `?x_api_key=` as a query parameter, which FastAPI does **not** read as a Header. When `GPU_API_KEY` is set, SSE streaming from the Web UI will fail with 401.
 
-5. **No input validation**: No MIME type checking on uploaded files. No file size limits. No sanitization of `output_subdir` (potential path traversal with values like `../../etc`).
+5. **No input validation (partial fix)**: No MIME type checking on uploaded files. No file size limits. ~~No sanitization of `output_subdir`~~ **output_subdir sanitized (Phase 8.1)** — `_validate_output_subdir()` rejects `..`, `/`, `\` and verifies `Path.resolve()` stays inside WORK_DIR. Returns HTTP 400 on violation.
 
 6. **output_subdir collision**: If two jobs use the same `output_subdir`, files overwrite each other (e.g., `input.png`, `mesh.glb`).
 

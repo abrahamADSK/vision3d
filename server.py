@@ -63,6 +63,9 @@ VISION_DIR = Path(
 
 _jobs: dict[str, dict] = {}
 
+# GPU concurrency protection — only one inference job at a time (RTX 3090, 24 GB shared VRAM)
+_gpu_semaphore = asyncio.Semaphore(1)
+
 
 def _new_job(job_type: str, detail: str = "") -> str:
     job_id = str(uuid.uuid4())[:8]
@@ -96,6 +99,36 @@ def _job_fail(job_id: str, error: str):
     if job_id in _jobs:
         _jobs[job_id]["status"] = "failed"
         _jobs[job_id]["error"] = error
+
+
+# ── Input validation ─────────────────────────────────────────────────────────
+
+import re
+
+
+def _validate_output_subdir(output_subdir: str) -> str:
+    """Sanitize output_subdir to prevent path traversal attacks.
+
+    Rejects values containing '..', '/', or '\\' and verifies the resolved
+    path stays inside WORK_DIR.  Returns the validated subdir string or
+    raises HTTP 400.
+    """
+    # Reject obviously dangerous characters / sequences
+    if re.search(r'(\.\.|[/\\])', output_subdir):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid output_subdir '{output_subdir}': must not contain '..', '/' or '\\'",
+        )
+
+    # Resolve and verify the path stays within WORK_DIR
+    resolved = (WORK_DIR / output_subdir).resolve()
+    if not str(resolved).startswith(str(WORK_DIR.resolve())):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid output_subdir '{output_subdir}': resolves outside working directory",
+        )
+
+    return output_subdir
 
 
 # ── Authentication ───────────────────────────────────────────────────────────
@@ -536,7 +569,8 @@ def _resolve_preset(target_faces: int, preset: str, model: str = "",
             params["octree_resolution"] = octree_resolution
         if num_inference_steps > 0:
             params["num_inference_steps"] = num_inference_steps
-        if target_faces >= 0 and not preset:
+        # Explicit target_faces (>0) overrides preset value; 0 keeps preset default
+        if target_faces > 0:
             params["target_faces"] = target_faces
         return params
     return {
@@ -906,19 +940,34 @@ def _run_full_pipeline(
 
 
 async def _run_in_background(job_id: str, func, *args):
-    """Run a blocking inference function in a thread, update job status."""
+    """Run a blocking inference function in a thread, update job status.
+
+    Acquires _gpu_semaphore for the duration of the job to prevent
+    concurrent GPU access (OOM protection).
+    """
     loop = asyncio.get_event_loop()
-    try:
-        result = await loop.run_in_executor(None, func, *args)
-        output_dir = result.get("output_dir") or str(
-            Path(result.get("mesh_path", "")).parent
+    async with _gpu_semaphore:
+        try:
+            result = await loop.run_in_executor(None, func, *args)
+            output_dir = result.get("output_dir") or str(
+                Path(result.get("mesh_path", "")).parent
+            )
+            files = result.get("files", [])
+            if not files and "mesh_path" in result:
+                files = ["mesh.glb"]
+            _job_done(job_id, output_dir, files)
+        except Exception as e:
+            _job_fail(job_id, f"{e}\n{traceback.format_exc()}")
+
+
+def _check_gpu_available():
+    """Raise HTTP 429 if the GPU is already busy with another job."""
+    if _gpu_semaphore.locked():
+        raise HTTPException(
+            status_code=429,
+            detail="GPU busy — another job is running. Try again later.",
+            headers={"Retry-After": "30"},
         )
-        files = result.get("files", [])
-        if not files and "mesh_path" in result:
-            files = ["mesh.glb"]
-        _job_done(job_id, output_dir, files)
-    except Exception as e:
-        _job_fail(job_id, f"{e}\n{traceback.format_exc()}")
 
 
 # ── FastAPI app ──────────────────────────────────────────────────────────────
@@ -977,6 +1026,8 @@ async def generate_shape(
 ):
     """Upload an image, get a 3D mesh back (async job)."""
     _verify_api_key(x_api_key)
+    output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
+    _check_gpu_available()  # Reject if GPU is busy (OOM protection)
 
     params = _resolve_preset(target_faces, preset, model, octree_resolution, num_inference_steps)
     job_id = _new_job("shape-image", f"subdir={output_subdir}, target_faces={params['target_faces']}")
@@ -1012,6 +1063,8 @@ async def generate_text(
 ):
     """Generate 3D mesh from text prompt (async job)."""
     _verify_api_key(x_api_key)
+    output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
+    _check_gpu_available()  # Reject if GPU is busy (OOM protection)
 
     params = _resolve_preset(target_faces, preset, model, octree_resolution, num_inference_steps)
     job_id = _new_job("shape-text", f"prompt={text_prompt[:50]}")
@@ -1037,6 +1090,8 @@ async def texture_mesh(
 ):
     """Upload mesh + image, get textured mesh back (async job)."""
     _verify_api_key(x_api_key)
+    output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
+    _check_gpu_available()  # Reject if GPU is busy (OOM protection)
 
     job_id = _new_job("texture", f"subdir={output_subdir}")
     out_dir = WORK_DIR / output_subdir
@@ -1146,6 +1201,8 @@ async def generate_full(
     Use /api/jobs/{job_id}/stream for real-time Server-Sent Events progress.
     """
     _verify_api_key(x_api_key)
+    output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
+    _check_gpu_available()  # Reject if GPU is busy (OOM protection)
 
     params = _resolve_preset(target_faces, preset, model, octree_resolution, num_inference_steps)
     preset_label = preset or f"{params['target_faces']} faces"

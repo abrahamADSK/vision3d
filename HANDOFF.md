@@ -1,7 +1,7 @@
 # HANDOFF — vision3d
 
-**Last updated**: 2026-04-05 — Phase 6: server.py audit and CLAUDE.md rewrite
-**Completitud**: ~90% (server funcional, documentación auditada, sin tests)
+**Last updated**: 2026-04-05 — Phase 8.1: security + stability fixes in server.py
+**Completitud**: ~93% (server funcional, 3 bugs críticos corregidos, sin tests)
 
 ---
 
@@ -137,15 +137,15 @@ Estas discrepancias entre el CLAUDE.md anterior y el código real de server.py f
 
 Estos problemas se encontraron en el código y están **documentados en CLAUDE.md §12** pero **NO corregidos** (pendientes para Fase 8):
 
-| # | Severidad | Problema | Ubicación |
+| # | Severidad | Problema | Estado |
 |---|---|---|---|
-| 1 | **Media** | `_resolve_preset` ignora `target_faces` explícito cuando `preset` está presente (line 539: `not preset` siempre False) | `_resolve_preset()` |
-| 2 | **Media** | Jobs acumulan en memoria sin TTL/cleanup — memory leak en server long-running | `_jobs` dict |
-| 3 | **Alta** | Sin protección de concurrencia GPU — múltiples jobs simultáneos causan OOM | `asyncio.create_task()` |
-| 4 | **Media** | SSE auth bypass desde Web UI — EventSource no soporta custom headers, Web UI pasa key como query param que FastAPI no lee como Header | `stream_job()` + Web UI JS |
-| 5 | **Alta** | Sin sanitización de `output_subdir` — path traversal potencial (e.g., `../../etc`) | Todos los POST endpoints |
-| 6 | **Baja** | Colisión de `output_subdir` — dos jobs con mismo subdir sobrescriben archivos | Output directory |
-| 7 | **Baja** | `texture_baked.png` falla silenciosamente — no hay señal al cliente de si el archivo existirá | `_run_texture()` y similares |
+| 1 | **Media** | `_resolve_preset` ignora `target_faces` explícito cuando `preset` está presente | ✅ **FIXED Phase 8.1** — `target_faces > 0` ahora prevalece sobre preset |
+| 2 | **Media** | Jobs acumulan en memoria sin TTL/cleanup — memory leak en server long-running | ❌ Pendiente |
+| 3 | **Alta** | Sin protección de concurrencia GPU — múltiples jobs simultáneos causan OOM | ✅ **FIXED Phase 8.1** — `asyncio.Semaphore(1)` + HTTP 429 |
+| 4 | **Media** | SSE auth bypass desde Web UI — EventSource no soporta custom headers | ❌ Pendiente |
+| 5 | **Alta** | Sin sanitización de `output_subdir` — path traversal potencial | ✅ **FIXED Phase 8.1** — `_validate_output_subdir()` + HTTP 400 |
+| 6 | **Baja** | Colisión de `output_subdir` — dos jobs con mismo subdir sobrescriben archivos | ❌ Pendiente |
+| 7 | **Baja** | `texture_baked.png` falla silenciosamente | ❌ Pendiente |
 
 ### 3.3 Qué se corrigió vs. qué queda pendiente
 
@@ -182,9 +182,9 @@ Estos problemas se encontraron en el código y están **documentados en CLAUDE.m
 ## 5. Próximos pasos (candidato a Fase 8)
 
 **Prioridad alta** (bugs con impacto en producción):
-- [ ] Fix `_resolve_preset` — permitir override de `target_faces` con preset
-- [ ] Sanitizar `output_subdir` contra path traversal
-- [ ] Implementar semaphore para concurrencia GPU (1 job a la vez)
+- [x] Fix `_resolve_preset` — permitir override de `target_faces` con preset **(Phase 8.1)**
+- [x] Sanitizar `output_subdir` contra path traversal **(Phase 8.1)**
+- [x] Implementar semaphore para concurrencia GPU (1 job a la vez) **(Phase 8.1)**
 
 **Prioridad media** (robustez):
 - [ ] Fix SSE auth — leer `x_api_key` de query param como fallback
@@ -198,4 +198,13 @@ Estos problemas se encontraron en el código y están **documentados en CLAUDE.m
 
 ---
 
-## Última actualización: 2026-04-05 — Phase 6: auditoría exhaustiva de server.py, reescritura completa de CLAUDE.md (360 insertions, 111 deletions), 7 bugs documentados
+## Última actualización: 2026-04-05 — Phase 8.1: fixes de prioridad alta en server.py
+
+### Phase 8.1 — Cambios aplicados
+- **Fix 1 (Bug #1)**: `_resolve_preset()` — cambiado `if target_faces >= 0 and not preset:` → `if target_faces > 0:`. Ahora `target_faces` explícito (>0) prevalece sobre el valor del preset.
+- **Fix 3 (Bug #3)**: GPU semaphore — `asyncio.Semaphore(1)` a nivel de módulo. `_check_gpu_available()` en los 4 POST endpoints devuelve HTTP 429 si la GPU está ocupada. `_run_in_background()` mantiene el semaphore durante toda la inferencia.
+- **Fix 5 (Bug #5)**: Path traversal — nueva función `_validate_output_subdir()` rechaza `..`, `/`, `\` y verifica con `Path.resolve()` que el path queda dentro de WORK_DIR. Aplicada en los 4 POST endpoints. Devuelve HTTP 400.
+- **CLAUDE.md §12**: Bugs 1, 3, 5 marcados como resueltos con descripción del fix.
+
+### Historial anterior
+- 2026-04-05 — Phase 6: auditoría exhaustiva de server.py, reescritura completa de CLAUDE.md (360 insertions, 111 deletions), 7 bugs documentados
