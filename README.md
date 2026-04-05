@@ -186,6 +186,32 @@ Browser / MCP client / curl
 | `hunyuan3d-delight-v2-0` | Tencent/Hunyuan3D-2 | ~4 GB | Relighting (paint dependency) |
 | `sdxl-turbo` | Stability AI | ~6 GB | Text → image (intermediate step) |
 
+## Project Structure
+
+```
+vision3d/
+├── server.py          # MCP server — FastMCP entry point and all tools
+├── requirements.txt   # Python dependencies
+├── setup.sh           # Environment setup and Hunyuan3D-2 installation script
+└── .env.example       # Environment variables template (CHECKPOINT_DIR, etc.)
+```
+
+## Troubleshooting
+
+**CUDA out of memory**
+- Reduce quality preset (use `draft` or `medium` instead of `high`)
+- Check GPU memory with `nvidia-smi` — the full pipeline requires ~16 GB VRAM
+- Only one generation job should run at a time (no concurrent GPU access)
+
+**Model weights not found**
+- Run the download script from Hunyuan3D-2: `python download_weights.py`
+- Verify weights are in the path specified by `CHECKPOINT_DIR` in your environment
+
+**Server starts but generation fails**
+- Check that `custom_rasterizer` compiled successfully (required for texturing)
+- Verify Hunyuan3D-2 installation: `python -c "from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline"`
+- Check server logs for stack traces
+
 ## Ecosystem
 
 `vision3d` is part of a four-component VFX pipeline. Each component has a defined role:
