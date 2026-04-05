@@ -1,6 +1,6 @@
 """Vision3D server.py — automated tests.
 
-Phase 8.3: 18 tests covering helpers (unit) and endpoints (integration).
+Phase 8.3: 20 tests covering helpers (unit) and endpoints (integration).
 No GPU, CUDA, or ML models required.
 """
 
