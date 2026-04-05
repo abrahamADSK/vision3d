@@ -150,7 +150,7 @@ All configuration is via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GPU_API_KEY` | _(empty = open)_ | API key for authentication. Leave empty for LAN use. |
+| `GPU_API_KEY` | _(empty = open)_ | API key for authentication. Leave empty for LAN use. Clients send the key via `X-API-Key` header, or `?key=<value>` query param for SSE connections (EventSource does not support custom headers). |
 | `GPU_MODELS_DIR` | `./hf_models` | Path to Hunyuan3D-2 model weights |
 | `GPU_WORK_DIR` | `./output` | Working directory for job outputs |
 | `GPU_VISION_DIR` | `.` (script dir) | Vision3D installation directory |
