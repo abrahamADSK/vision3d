@@ -1,7 +1,7 @@
 # HANDOFF — vision3d
 
-**Last updated**: 2026-04-05 — Phase 8.1: security + stability fixes in server.py
-**Completitud**: ~93% (server funcional, 3 bugs críticos corregidos, sin tests)
+**Last updated**: 2026-04-05 — Phase 8.2: robustness fixes in server.py
+**Completitud**: ~96% (server funcional, 6 bugs corregidos, sin tests)
 
 ---
 
@@ -140,10 +140,10 @@ Estos problemas se encontraron en el código y están **documentados en CLAUDE.m
 | # | Severidad | Problema | Estado |
 |---|---|---|---|
 | 1 | **Media** | `_resolve_preset` ignora `target_faces` explícito cuando `preset` está presente | ✅ **FIXED Phase 8.1** — `target_faces > 0` ahora prevalece sobre preset |
-| 2 | **Media** | Jobs acumulan en memoria sin TTL/cleanup — memory leak en server long-running | ❌ Pendiente |
+| 2 | **Media** | Jobs acumulan en memoria sin TTL/cleanup — memory leak en server long-running | ✅ **FIXED Phase 8.2** — `_cleanup_old_jobs()` cada 5 min, TTL 1h, max 100 jobs |
 | 3 | **Alta** | Sin protección de concurrencia GPU — múltiples jobs simultáneos causan OOM | ✅ **FIXED Phase 8.1** — `asyncio.Semaphore(1)` + HTTP 429 |
-| 4 | **Media** | SSE auth bypass desde Web UI — EventSource no soporta custom headers | ❌ Pendiente |
-| 5 | **Alta** | Sin sanitización de `output_subdir` — path traversal potencial | ✅ **FIXED Phase 8.1** — `_validate_output_subdir()` + HTTP 400 |
+| 4 | **Media** | SSE auth bypass desde Web UI — EventSource no soporta custom headers | ✅ **FIXED Phase 8.2** — `_verify_api_key()` acepta query param fallback |
+| 5 | **Alta** | Sin sanitización de `output_subdir` — path traversal potencial | ✅ **FIXED Phase 8.1** — `_validate_output_subdir()` + HTTP 400. **FIXED Phase 8.2** — `_validate_upload()` MIME type + size limit (50 MB) |
 | 6 | **Baja** | Colisión de `output_subdir` — dos jobs con mismo subdir sobrescriben archivos | ❌ Pendiente |
 | 7 | **Baja** | `texture_baked.png` falla silenciosamente | ❌ Pendiente |
 
@@ -187,9 +187,9 @@ Estos problemas se encontraron en el código y están **documentados en CLAUDE.m
 - [x] Implementar semaphore para concurrencia GPU (1 job a la vez) **(Phase 8.1)**
 
 **Prioridad media** (robustez):
-- [ ] Fix SSE auth — leer `x_api_key` de query param como fallback
-- [ ] Job cleanup — TTL o max jobs en memoria
-- [ ] Input validation — MIME type check en uploads
+- [x] Fix SSE auth — leer `x_api_key` de query param como fallback **(Phase 8.2)**
+- [x] Job cleanup — TTL o max jobs en memoria **(Phase 8.2)**
+- [x] Input validation — MIME type check en uploads **(Phase 8.2)**
 
 **Prioridad baja** (mejoras):
 - [ ] Tests automatizados (health, presets, _resolve_preset, job lifecycle)
@@ -198,7 +198,13 @@ Estos problemas se encontraron en el código y están **documentados en CLAUDE.m
 
 ---
 
-## Última actualización: 2026-04-05 — Phase 8.1: fixes de prioridad alta en server.py
+## Última actualización: 2026-04-05 — Phase 8.2: fixes de prioridad media (robustez)
+
+### Phase 8.2 — Cambios aplicados
+- **Fix 4 (Bug #4)**: SSE auth fallback — `_verify_api_key()` ahora acepta segundo arg `query_api_key`. Endpoint `stream_job()` lee `x_api_key` de Header y de Query param (alias). Web UI ya enviaba `?x_api_key=` — ahora el server lo respeta.
+- **Fix 5 (Bug #2)**: Job cleanup — constantes `JOB_TTL_SECONDS=3600`, `JOB_CLEANUP_INTERVAL=300`, `MAX_JOBS=100`. Función `_cleanup_old_jobs()` elimina jobs completed/failed >1h. Background task `_job_cleanup_loop()` registrado en `lifespan()`. `_check_max_jobs()` en los 4 POST endpoints rechaza con HTTP 503 si >100 jobs.
+- **Fix 6 (Bug #5 parcial)**: Input validation — helper `_validate_upload()` verifica Content-Type y tamaño (max 50 MB). Tipos permitidos: imágenes (`image/png`, `image/jpeg`, `image/webp`), meshes (`model/gltf-binary`, `application/octet-stream`). Aplicado en `generate-shape`, `texture-mesh`, `generate-full`. Devuelve HTTP 400.
+- **CLAUDE.md §12**: Bugs 2, 4, 5 marcados como resueltos con descripción del fix.
 
 ### Phase 8.1 — Cambios aplicados
 - **Fix 1 (Bug #1)**: `_resolve_preset()` — cambiado `if target_faces >= 0 and not preset:` → `if target_faces > 0:`. Ahora `target_faces` explícito (>0) prevalece sobre el valor del preset.

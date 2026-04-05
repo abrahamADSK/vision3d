@@ -493,13 +493,13 @@ cd ~/ai-studio/vision3d/
 
 1. ~~**`_resolve_preset` target_faces override bug**~~: **FIXED (Phase 8.1)** — Changed condition to `if target_faces > 0:` so explicit target_faces overrides preset value. Preset default is kept only when target_faces is 0 or not provided.
 
-2. **No job cleanup / memory leak**: `_jobs` dict grows forever. Long-running server accumulates jobs in memory with no TTL or eviction. Includes full log history per job.
+2. ~~**No job cleanup / memory leak**~~: **FIXED (Phase 8.2)** — Added `_cleanup_old_jobs()` background task that runs every 5 minutes (`JOB_CLEANUP_INTERVAL=300`), removing completed/failed jobs older than 1 hour (`JOB_TTL_SECONDS=3600`). Added `_check_max_jobs()` that rejects new jobs with HTTP 503 if `len(_jobs) > 100` (`MAX_JOBS=100`). Both constants are configurable.
 
 3. ~~**No concurrent job protection**~~: **FIXED (Phase 8.1)** — Added `asyncio.Semaphore(1)` (`_gpu_semaphore`). All POST endpoints call `_check_gpu_available()` upfront; returns HTTP 429 with `Retry-After: 30` if GPU is busy. The semaphore is held for the full duration of `_run_in_background()`.
 
-4. **SSE auth bypass from Web UI**: The SSE endpoint expects `x_api_key` as an HTTP header, but `EventSource` (used by the Web UI) does not support custom headers. The Web UI appends `?x_api_key=` as a query parameter, which FastAPI does **not** read as a Header. When `GPU_API_KEY` is set, SSE streaming from the Web UI will fail with 401.
+4. ~~**SSE auth bypass from Web UI**~~: **FIXED (Phase 8.2)** — `_verify_api_key()` now accepts an optional `query_api_key` fallback parameter. The `stream_job()` endpoint reads `x_api_key` from both Header and Query param (`Query(None, alias="x_api_key")`). Header takes priority; query param is used as fallback for EventSource connections. The Web UI already sends `?x_api_key=` in the URL.
 
-5. **No input validation (partial fix)**: No MIME type checking on uploaded files. No file size limits. ~~No sanitization of `output_subdir`~~ **output_subdir sanitized (Phase 8.1)** — `_validate_output_subdir()` rejects `..`, `/`, `\` and verifies `Path.resolve()` stays inside WORK_DIR. Returns HTTP 400 on violation.
+5. ~~**No input validation**~~: **Mostly FIXED** — ~~No sanitization of `output_subdir`~~ **output_subdir sanitized (Phase 8.1)** — `_validate_output_subdir()` rejects `..`, `/`, `\` and verifies `Path.resolve()` stays inside WORK_DIR. **MIME type + size validation added (Phase 8.2)** — `_validate_upload()` checks Content-Type against allowed lists (`ALLOWED_IMAGE_TYPES`: png/jpeg/webp; `ALLOWED_MESH_TYPES`: gltf-binary/octet-stream) and enforces 50 MB max file size. Applied to `generate-shape`, `texture-mesh`, `generate-full`. Returns HTTP 400 on violation.
 
 6. **output_subdir collision**: If two jobs use the same `output_subdir`, files overwrite each other (e.g., `input.png`, `mesh.glb`).
 

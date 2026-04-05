@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, Header, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Header, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -101,6 +101,48 @@ def _job_fail(job_id: str, error: str):
         _jobs[job_id]["error"] = error
 
 
+# ── Job cleanup (TTL-based eviction) — Phase 8.2 fix for Bug #2 ────────────
+
+JOB_TTL_SECONDS = 3600      # Remove completed/failed jobs older than 1 hour
+JOB_CLEANUP_INTERVAL = 300  # Run cleanup every 5 minutes
+MAX_JOBS = 100               # Reject new jobs if _jobs exceeds this limit
+
+
+def _cleanup_old_jobs() -> int:
+    """Remove completed/failed jobs older than JOB_TTL_SECONDS.
+
+    Returns the number of jobs removed.
+    """
+    now = time.time()
+    expired = [
+        jid for jid, job in _jobs.items()
+        if job["status"] in ("completed", "failed")
+        and (now - job["created"]) > JOB_TTL_SECONDS
+    ]
+    for jid in expired:
+        del _jobs[jid]
+    return len(expired)
+
+
+async def _job_cleanup_loop():
+    """Background task that periodically cleans up expired jobs."""
+    while True:
+        await asyncio.sleep(JOB_CLEANUP_INTERVAL)
+        n = _cleanup_old_jobs()
+        if n > 0:
+            print(f"[Vision3D] Cleaned {n} expired jobs")
+
+
+def _check_max_jobs():
+    """Raise HTTP 503 if the job dict exceeds MAX_JOBS (memory protection)."""
+    if len(_jobs) > MAX_JOBS:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Too many jobs ({len(_jobs)}). Try again later.",
+            headers={"Retry-After": "60"},
+        )
+
+
 # ── Input validation ─────────────────────────────────────────────────────────
 
 import re
@@ -131,14 +173,61 @@ def _validate_output_subdir(output_subdir: str) -> str:
     return output_subdir
 
 
+# Allowed MIME types for upload validation (Phase 8.2 — Bug #5 partial fix)
+ALLOWED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"]
+ALLOWED_MESH_TYPES = ["model/gltf-binary", "application/octet-stream"]  # GLB often sent as octet-stream
+
+
+async def _validate_upload(
+    file: UploadFile,
+    allowed_types: list[str],
+    max_size_mb: int = 50,
+) -> bytes:
+    """Validate upload MIME type and size, return file content.
+
+    Reads the file once and returns content to avoid double-read.
+    Raises HTTP 400 if validation fails. Phase 8.2 fix for Bug #5.
+    """
+    # Check Content-Type against allowed list
+    content_type = file.content_type or ""
+    if content_type not in allowed_types:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid file type '{content_type}' for '{file.filename}'. "
+                f"Allowed: {', '.join(allowed_types)}"
+            ),
+        )
+
+    # Read content and check size
+    content = await file.read()
+    max_bytes = max_size_mb * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"File '{file.filename}' too large ({len(content) / 1024 / 1024:.1f} MB). "
+                f"Maximum: {max_size_mb} MB"
+            ),
+        )
+
+    return content
+
+
 # ── Authentication ───────────────────────────────────────────────────────────
 
 
-def _verify_api_key(x_api_key: Optional[str]):
-    """Verify API key if one is configured."""
+def _verify_api_key(x_api_key: Optional[str], query_api_key: Optional[str] = None):
+    """Verify API key if one is configured.
+
+    Checks header first, falls back to query param (needed for SSE/EventSource
+    which cannot send custom headers). Phase 8.2 fix for Bug #4.
+    """
     if not API_KEY:
         return  # No API key configured — open access (LAN only)
-    if not x_api_key or not secrets.compare_digest(x_api_key, API_KEY):
+    # Use header key if present, otherwise fall back to query param
+    key = x_api_key or query_api_key
+    if not key or not secrets.compare_digest(key, API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
@@ -979,7 +1068,11 @@ async def lifespan(app: FastAPI):
     print(f"[Vision3D] Models dir: {MODELS_DIR}")
     print(f"[Vision3D] Work dir:   {WORK_DIR}")
     print(f"[Vision3D] API key:    {'configured' if API_KEY else 'NONE (open access)'}")
+    # Start background job cleanup task (Phase 8.2 — Bug #2 fix)
+    cleanup_task = asyncio.create_task(_job_cleanup_loop())
+    print(f"[Vision3D] Job cleanup: every {JOB_CLEANUP_INTERVAL}s, TTL {JOB_TTL_SECONDS}s, max {MAX_JOBS} jobs")
     yield
+    cleanup_task.cancel()  # Stop cleanup on shutdown
 
 
 app = FastAPI(
@@ -1028,16 +1121,19 @@ async def generate_shape(
     _verify_api_key(x_api_key)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
+    _check_max_jobs()  # Reject if too many jobs in memory (Phase 8.2)
+
+    # Validate upload: MIME type + size (Phase 8.2 — Bug #5 fix)
+    image_content = await _validate_upload(image, ALLOWED_IMAGE_TYPES)
 
     params = _resolve_preset(target_faces, preset, model, octree_resolution, num_inference_steps)
     job_id = _new_job("shape-image", f"subdir={output_subdir}, target_faces={params['target_faces']}")
     out_dir = WORK_DIR / output_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save uploaded image
+    # Save uploaded image (already read by _validate_upload)
     image_path = out_dir / "input.png"
-    content = await image.read()
-    image_path.write_bytes(content)
+    image_path.write_bytes(image_content)
 
     # Launch inference in background
     asyncio.create_task(
@@ -1065,6 +1161,7 @@ async def generate_text(
     _verify_api_key(x_api_key)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
+    _check_max_jobs()  # Reject if too many jobs in memory (Phase 8.2)
 
     params = _resolve_preset(target_faces, preset, model, octree_resolution, num_inference_steps)
     job_id = _new_job("shape-text", f"prompt={text_prompt[:50]}")
@@ -1092,17 +1189,20 @@ async def texture_mesh(
     _verify_api_key(x_api_key)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
+    _check_max_jobs()  # Reject if too many jobs in memory (Phase 8.2)
+
+    # Validate uploads: MIME type + size (Phase 8.2 — Bug #5 fix)
+    mesh_content = await _validate_upload(mesh, ALLOWED_MESH_TYPES)
+    image_content = await _validate_upload(image, ALLOWED_IMAGE_TYPES)
 
     job_id = _new_job("texture", f"subdir={output_subdir}")
     out_dir = WORK_DIR / output_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     mesh_path = out_dir / "mesh.glb"
-    mesh_content = await mesh.read()
     mesh_path.write_bytes(mesh_content)
 
     image_path = out_dir / "input.png"
-    image_content = await image.read()
     image_path.write_bytes(image_content)
 
     asyncio.create_task(
@@ -1203,6 +1303,10 @@ async def generate_full(
     _verify_api_key(x_api_key)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
+    _check_max_jobs()  # Reject if too many jobs in memory (Phase 8.2)
+
+    # Validate upload: MIME type + size (Phase 8.2 — Bug #5 fix)
+    image_content = await _validate_upload(image, ALLOWED_IMAGE_TYPES)
 
     params = _resolve_preset(target_faces, preset, model, octree_resolution, num_inference_steps)
     preset_label = preset or f"{params['target_faces']} faces"
@@ -1211,8 +1315,7 @@ async def generate_full(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     image_path = out_dir / "input.png"
-    content = await image.read()
-    image_path.write_bytes(content)
+    image_path.write_bytes(image_content)
 
     asyncio.create_task(
         _run_in_background(
@@ -1235,13 +1338,19 @@ async def generate_full(
 
 
 @app.get("/api/jobs/{job_id}/stream")
-async def stream_job(job_id: str, x_api_key: Optional[str] = Header(None)):
+async def stream_job(
+    job_id: str,
+    x_api_key: Optional[str] = Header(None),
+    x_api_key_query: Optional[str] = Query(None, alias="x_api_key"),
+):
     """Stream job progress as Server-Sent Events (SSE).
 
-    Connect with: const es = new EventSource('/api/jobs/{job_id}/stream')
+    Connect with: const es = new EventSource('/api/jobs/{job_id}/stream?x_api_key=KEY')
     Events: 'log' (progress lines), 'status' (running/completed/failed), 'done' (final).
+    Accepts API key via header or query param (EventSource cannot send custom headers).
     """
-    _verify_api_key(x_api_key)
+    # SSE auth: header first, query param fallback (Bug #4 fix — Phase 8.2)
+    _verify_api_key(x_api_key, query_api_key=x_api_key_query)
 
     job = _jobs.get(job_id)
     if not job:
