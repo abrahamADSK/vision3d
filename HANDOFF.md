@@ -151,35 +151,33 @@ Estos problemas se encontraron en el código y están **documentados en CLAUDE.m
 | 6 | **Baja** | Colisión de `output_subdir` — dos jobs con mismo subdir sobrescriben archivos | ✅ **FIXED Phase 8.3** — `_resolve_output_subdir()` reemplaza default "0" con UUID8 |
 | 7 | **Baja** | `texture_baked.png` falla silenciosamente | ✅ **FIXED Phase 8.3** — `_job_log()` advierte al cliente cuando la extracción falla |
 
-### 3.3 Qué se corrigió vs. qué queda pendiente
+### 3.3 Estado de correcciones (actualizado Phase 8.3)
 
-| Categoría | Corregido (CLAUDE.md) | Pendiente (código) |
+| Categoría | Documentación | Código |
 |---|---|---|
 | Documentación de endpoints | ✅ Parámetros, types, defaults, responses | — |
 | Documentación de SSE | ✅ Event types, format, poll interval | — |
 | Documentación de jobs | ✅ Lifecycle, types, output structure | — |
 | Documentación de decimation | ✅ Algorithm, fallback chain | — |
-| Bug `_resolve_preset` | ✅ Documentado en §12 | ❌ Fix en server.py |
-| Memory leak jobs | ✅ Documentado en §12 | ❌ Implementar TTL/cleanup |
-| Concurrencia GPU | ✅ Documentado en §12 | ❌ Implementar job queue/semaphore |
-| SSE auth bypass | ✅ Documentado en §12 | ❌ Leer key de query param como fallback |
-| Path traversal | ✅ Documentado en §12 | ❌ Sanitizar output_subdir |
-| Input validation | ✅ Documentado en §12 | ❌ MIME type check, size limits |
-| Tests | — | ❌ No existen |
+| Bug `_resolve_preset` | ✅ §12 | ✅ Phase 8.1 |
+| Memory leak jobs | ✅ §12 | ✅ Phase 8.2 |
+| Concurrencia GPU | ✅ §12 | ✅ Phase 8.1 |
+| SSE auth bypass | ✅ §12 | ✅ Phase 8.2 |
+| Path traversal | ✅ §12 | ✅ Phase 8.1 |
+| Input validation | ✅ §12 | ✅ Phase 8.2 |
+| output_subdir collision | ✅ §12 | ✅ Phase 8.3 |
+| texture_baked.png silencioso | ✅ §12 | ✅ Phase 8.3 |
+| Tests | — | ✅ Phase 8.3 (20 tests) |
 
 ---
 
-## 4. Decisiones pendientes
+## 4. Decisiones ejecutadas (Phase 8)
 
-1. **¿Implementar job queue con semaphore?** — Actualmente nada previene OOM por jobs concurrentes. Opciones: `asyncio.Semaphore(1)`, queue con Redis, o simplemente rechazar jobs si uno está running.
-
-2. **¿Añadir TTL a jobs?** — Los jobs crecen en memoria indefinidamente. Opciones: cleanup periódico (e.g., 1 hora), max jobs en memoria, persistencia en SQLite.
-
-3. **¿Fix del SSE auth?** — El EventSource del browser no soporta custom headers. Opciones: leer `x_api_key` también de query param, usar token en URL path, o session cookies.
-
-4. **¿Sanitización de output_subdir?** — Path traversal es una vulnerabilidad real. Opciones: whitelist de caracteres, `Path.resolve()` + check que está dentro de WORK_DIR, o UUIDs forzados.
-
-5. **¿Tests automatizados?** — No hay ninguno. Mínimo viable: health endpoint, presets endpoint, unit tests de `_resolve_preset`, mock tests de job lifecycle.
+1. **GPU semaphore** — `asyncio.Semaphore(1)` con HTTP 429 si busy. Sin queue Redis (innecesario para un solo usuario).
+2. **Job TTL** — Cleanup periódico cada 5 min, TTL 1h, max 100 jobs en memoria. Sin persistencia SQLite.
+3. **SSE auth** — Query param fallback en `_verify_api_key()`. Sin session cookies.
+4. **output_subdir** — Path traversal: regex + `Path.resolve()`. Colisión: UUID8 para default `"0"`.
+5. **Tests** — 20 tests con pytest, mocks de torch/ML, sin GPU necesaria.
 
 ---
 
@@ -203,28 +201,25 @@ Estos problemas se encontraron en el código y están **documentados en CLAUDE.m
 
 ---
 
-## Última actualización: 2026-04-05 — Phase 8.2: fixes de prioridad media (robustez)
+## Changelog
 
-### Phase 8.2 — Cambios aplicados
+### Phase 8.3 (2026-04-05) — Fixes finales + tests
+- **Fix 7 (Bug #6)**: output_subdir collision — `_resolve_output_subdir()` reemplaza default "0" con UUID8.
+- **Fix 8 (Bug #7)**: texture_baked.png silencioso — `_job_log()` advierte al cliente cuando la extracción falla.
+- **Tests**: 20 tests en `tests/test_server.py` — 12 unit + 8 endpoint. No requieren GPU.
+- **CLAUDE.md §12**: Bugs 6 y 7 marcados como resueltos.
+
+### Phase 8.2 (2026-04-05) — Robustez
 - **Fix 4 (Bug #4)**: SSE auth fallback — `_verify_api_key()` ahora acepta segundo arg `query_api_key`. Endpoint `stream_job()` lee `x_api_key` de Header y de Query param (alias). Web UI ya enviaba `?x_api_key=` — ahora el server lo respeta.
 - **Fix 5 (Bug #2)**: Job cleanup — constantes `JOB_TTL_SECONDS=3600`, `JOB_CLEANUP_INTERVAL=300`, `MAX_JOBS=100`. Función `_cleanup_old_jobs()` elimina jobs completed/failed >1h. Background task `_job_cleanup_loop()` registrado en `lifespan()`. `_check_max_jobs()` en los 4 POST endpoints rechaza con HTTP 503 si >100 jobs.
 - **Fix 6 (Bug #5 parcial)**: Input validation — helper `_validate_upload()` verifica Content-Type y tamaño (max 50 MB). Tipos permitidos: imágenes (`image/png`, `image/jpeg`, `image/webp`), meshes (`model/gltf-binary`, `application/octet-stream`). Aplicado en `generate-shape`, `texture-mesh`, `generate-full`. Devuelve HTTP 400.
 - **CLAUDE.md §12**: Bugs 2, 4, 5 marcados como resueltos con descripción del fix.
 
-### Phase 8.1 — Cambios aplicados
+### Phase 8.1 (2026-04-05) — Seguridad + estabilidad
 - **Fix 1 (Bug #1)**: `_resolve_preset()` — cambiado `if target_faces >= 0 and not preset:` → `if target_faces > 0:`. Ahora `target_faces` explícito (>0) prevalece sobre el valor del preset.
 - **Fix 3 (Bug #3)**: GPU semaphore — `asyncio.Semaphore(1)` a nivel de módulo. `_check_gpu_available()` en los 4 POST endpoints devuelve HTTP 429 si la GPU está ocupada. `_run_in_background()` mantiene el semaphore durante toda la inferencia.
 - **Fix 5 (Bug #5)**: Path traversal — nueva función `_validate_output_subdir()` rechaza `..`, `/`, `\` y verifica con `Path.resolve()` que el path queda dentro de WORK_DIR. Aplicada en los 4 POST endpoints. Devuelve HTTP 400.
 - **CLAUDE.md §12**: Bugs 1, 3, 5 marcados como resueltos con descripción del fix.
 
-## Última actualización: 2026-04-05 — Phase 8.3: fixes finales + tests automatizados
-
-### Phase 8.3 — Cambios aplicados
-- **Fix 7 (Bug #6)**: output_subdir collision — nuevo helper `_resolve_output_subdir()` que reemplaza el default `"0"` con los primeros 8 chars de `uuid4()` (mismo formato que job_id). Si el usuario pasa un valor explícito, se respeta. Aplicado en los 4 POST endpoints, después de `_validate_output_subdir()`.
-- **Fix 8 (Bug #7)**: texture_baked.png silencioso — añadido `_job_log(job_id, "⚠ texture_baked.png extraction failed — file not included")` en los 3 bloques `else` donde la extracción falla (`_run_shape_from_text`, `_run_texture`, `_run_full_pipeline`). No cambia el comportamiento (el job sigue completando), solo hace visible el fallo.
-- **Tests automatizados**: 20 tests en `tests/test_server.py` con pytest. Estructura: `tests/__init__.py`, `tests/conftest.py` (fixtures, mocks de torch/ML), `tests/test_server.py`. 12 unit tests (helpers) + 8 endpoint tests (TestClient). No requieren GPU. Ejecutar: `python -m pytest tests/ -v`.
-- **CLAUDE.md §12**: Bugs 6 y 7 marcados como resueltos.
-- **Todos los 7 bugs documentados en Phase 6 están resueltos**: 3 en Phase 8.1, 3 en Phase 8.2, 2 en Phase 8.3 (bug #5 se corrigió en dos fases).
-
-### Historial anterior
-- 2026-04-05 — Phase 6: auditoría exhaustiva de server.py, reescritura completa de CLAUDE.md (360 insertions, 111 deletions), 7 bugs documentados
+### Phase 6 (2026-04-05) — Auditoría
+- Auditoría exhaustiva de server.py, reescritura completa de CLAUDE.md (360 insertions, 111 deletions), 7 bugs documentados
