@@ -1,6 +1,7 @@
 # Vision3D — Critical Context for Claude
 
-> **Last updated**: 2026-04-01
+> **Last updated**: 2026-04-05
+> **Audited against**: `server.py` (1646 lines, commit at time of audit)
 
 ---
 
@@ -8,11 +9,18 @@
 
 **Vision3D** is a FastAPI server running on GPU machine **glorfindel** (Rocky Linux), exposing a REST API for 3D model generation using **Hunyuan3D-2** (Tencent) and **SDXL Turbo** (Stability AI).
 
-Four main endpoints:
-- **image-to-3D** (`/api/generate-shape`): Image → 3D mesh
-- **text-to-3D** (`/api/generate-text`): Text prompt → intermediate image (SDXL Turbo) → 3D mesh
-- **texture painting** (`/api/texture-mesh`): Mesh + image → textured mesh
-- **full-pipeline** (`/api/generate-full`): Image → shape + decimation + texture in one call
+Eleven REST endpoints + embedded Web UI:
+- **image-to-3D** (`POST /api/generate-shape`): Image → 3D mesh (`.glb`)
+- **text-to-3D** (`POST /api/generate-text`): Text prompt → SDXL Turbo image → shape → decimate → textured mesh
+- **texture painting** (`POST /api/texture-mesh`): Mesh + image → textured mesh
+- **full-pipeline** (`POST /api/generate-full`): Image → shape + decimation + texture in one call
+- **job polling** (`GET /api/jobs/{job_id}`): Job status, log, and download links
+- **file download** (`GET /api/jobs/{job_id}/files/{filename}`): Download result files
+- **SSE stream** (`GET /api/jobs/{job_id}/stream`): Real-time Server-Sent Events progress
+- **health** (`GET /api/health`): GPU info, available models, text-to-3D availability
+- **models** (`GET /api/models`): Available shape models with weights on disk
+- **presets** (`GET /api/presets`): Quality preset configurations
+- **web UI** (`GET /`): Embedded HTML UI with image-to-3D and text-to-3D tabs
 
 ---
 
@@ -27,20 +35,39 @@ Four main endpoints:
 ```
 ~/ai-studio/vision3d/
 ├── .venv/                          # Virtual environment
-├── server.py                        # FastAPI server
+├── server.py                        # FastAPI server (single file, ~1646 lines)
 ├── hy3dgen/                         # Local Hunyuan3D-2 code
 ├── Hunyuan3D-2/                     # Tencent/Hunyuan3D-2 git clone
-└── hf_models/                       # Downloaded models
+└── hf_models/                       # Downloaded models (GPU_MODELS_DIR)
     ├── hunyuan3d-dit-v2-0-turbo/   # ~400 MB, ~1 min generation
     ├── hunyuan3d-dit-v2-0-fast/    # ~1 GB, ~2-3 min
     ├── hunyuan3d-dit-v2-0/         # ~3 GB, ~5 min (max quality)
-    └── hunyuan3d-paint-v2-0-turbo/ # ~14 GB, texture model
+    ├── hunyuan3d-paint-v2-0-turbo/ # ~14 GB, texture model
+    └── hunyuan3d-delight-v2-0/     # ~4 GB, relighting model (DO NOT delete)
 ```
+
+### Environment Variables
+| Variable | Default | Description |
+|---|---|---|
+| `GPU_API_KEY` | `""` (empty = open access) | API key for authentication |
+| `GPU_MODELS_DIR` | `./hf_models` (relative to script) | Model weights directory |
+| `GPU_WORK_DIR` | `./output` (relative to script) | Job output directory |
+| `GPU_VISION_DIR` | `.` (script directory) | Vision3D installation root |
 
 ### Systemd service
 - **File**: `/etc/systemd/system/vision3d.service`
 - **Restart**: `sudo systemctl daemon-reload && sudo systemctl restart vision3d`
 - **Logs**: `sudo journalctl -u vision3d -f`
+
+### CLI Arguments
+```bash
+.venv/bin/python server.py --host 0.0.0.0 --port 8000   # defaults
+.venv/bin/python server.py --port 9000                    # custom port
+.venv/bin/python server.py --reload                       # auto-reload on code changes
+```
+- `--host`: bind address (default: `0.0.0.0`)
+- `--port`: port (default: `8000`)
+- `--reload`: uvicorn auto-reload for development
 
 ---
 
@@ -50,49 +77,59 @@ Four main endpoints:
 
 Geometry generation via `Hunyuan3DDiTFlowMatchingPipeline` from Tencent/Hunyuan3D-2.
 
-| Model | Time | Steps | Use case |
-|-------|------|-------|----------|
-| `turbo` | ~1 min | 5-10 | Quick prototyping |
-| `fast` | ~2-3 min | 15-20 | Iterations |
-| `full` | ~5 min | 30-50 | Final renders |
+| User-facing name | Subfolder | Time | Steps | Use case |
+|---|---|---|---|---|
+| `turbo` | `hunyuan3d-dit-v2-0-turbo` | ~1 min | 5-10 | Quick prototyping |
+| `fast` | `hunyuan3d-dit-v2-0-fast` | ~2-3 min | 15-20 | Iterations |
+| `full` | `hunyuan3d-dit-v2-0` | ~5 min | 30-50 | Final renders |
+
+Model availability is detected at runtime by checking for `model.fp16.safetensors` or `model.fp16.ckpt` in the subfolder.
 
 **CRITICAL**: The shape pipeline ONLY accepts `image=`, NEVER `text=`:
 ```python
-pipeline(image=pil_image, ...)  # Correct
-pipeline(text="...", ...)        # Error: unsupported parameter
+pipeline(image=pil_image, octree_resolution=384, num_inference_steps=30)  # Correct
+pipeline(text="...", ...)   # Error: unsupported parameter
 ```
 
 ### Text-to-3D (3-phase pipeline)
 
-`_run_shape_from_text()` implements:
+`_run_shape_from_text()` implements a full pipeline (NOT just shape — also textures):
 
-**Phase 1/3 — Text → Image**:
-1. Automatic prompt enhancement (white background, studio lighting, centered)
-2. **SDXL Turbo** generates 512x512 image with 4 steps (~2s), upscaled to 1024x1024
-3. SDXL Turbo unloaded from VRAM immediately (`_unload_t2i_pipeline()`)
-4. `BackgroundRemover` (rembg) removes background
+**Phase 1/3 — Text → Image** (steps 1-2/8):
+1. Load **SDXL Turbo** (`_load_t2i_pipeline()`)
+2. Automatic prompt enhancement: appends `"isolated object, centered, no floor, no ground, no shadow, white background, studio lighting, photorealistic, clean lines, product photography"`
+3. Generate 512×512 image with 4 steps, guidance_scale=0.0
+4. Upscale to 1024×1024 (PIL LANCZOS)
+5. Unload SDXL Turbo from VRAM (`_unload_t2i_pipeline()`)
+6. Save raw image as `text2img_reference.png`
+7. `BackgroundRemover` (rembg) removes background if image has <5% transparent pixels
+8. Save clean image as `text2img_clean.png` (not included in download list)
 
-**Phase 2/3 — Shape Generation**:
-5. Clean image → shape pipeline (image-to-3D)
-6. Decimation to `target_faces`
-7. Shape pipeline unloaded from VRAM (`_unload_shape_pipeline()`)
+**Phase 2/3 — Shape Generation** (steps 3-5/8):
+1. Load shape pipeline for requested model
+2. Generate 3D mesh from clean image
+3. Decimate if `target_faces > 0` and `orig_faces > target_faces`
+4. Save `mesh.glb`
+5. Unload shape pipeline from VRAM (`_unload_shape_pipeline()`)
 
-**Phase 3/3 — Texturing**:
-8. Paint pipeline generates texture using reference image
-9. Output: `textured.glb`, `mesh_uv.obj`, `texture_baked.png`, `mesh.glb`
+**Phase 3/3 — Texturing** (steps 6-8/8):
+1. Load paint pipeline
+2. Paint texture using reference image
+3. Save: `textured.glb`, `mesh_uv.obj`, `texture_baked.png` (if extractable), `mesh.glb`
 
 ### Text-to-image model
 - **Pipeline**: `AutoPipelineForText2Image` (from `diffusers`) — **SDXL Turbo**
 - **Model**: `stabilityai/sdxl-turbo` (~6 GB in fp16)
 - **Auto-downloaded** on first use (via HuggingFace)
 - **Dependencies**: `diffusers`, `transformers`, `accelerate`
-- **VRAM management**: loaded on demand, fully unloaded after generation
-- **Parameters**: 4 inference steps, guidance_scale=0.0, 512x512 + upscale to 1024x1024
+- **VRAM management**: loaded on demand, fully unloaded after generation (moved to CPU then deleted, `gc.collect()` ×2, `torch.cuda.empty_cache()`, `torch.cuda.synchronize()`)
+- **Parameters**: 4 inference steps, guidance_scale=0.0, 512×512 + upscale to 1024×1024
 
 ### Paint model (Texture)
 - **Model**: `hunyuan3d-paint-v2-0-turbo` (~14 GB)
 - **Dependency**: requires `hunyuan3d-delight-v2-0` (~4 GB, relighting model — DO NOT delete)
-- Used in both image-to-3D (full-pipeline) and text-to-3D
+- Used in: `generate-full`, `generate-text`, `texture-mesh`
+- **NOT unloaded after use** (stays cached in `_paint_pipeline`)
 
 ### VRAM Management (CRITICAL — RTX 3090, 24 GB)
 GPU is shared. Models do NOT fit simultaneously:
@@ -101,100 +138,267 @@ GPU is shared. Models do NOT fit simultaneously:
 - If shape and paint loaded together: silent OOM
 - CUDA extensions (`custom_rasterizer`, `differentiable_renderer`) must be recompiled if PyTorch is updated
 
+VRAM cleanup sequence in code: `del pipeline` → `gc.collect()` ×2 → `torch.cuda.empty_cache()` → `torch.cuda.synchronize()`.
+
 ---
 
 ## 4. Quality Presets
 
-`_resolve_preset()` in `server.py` maps `quality` → config:
+`_resolve_preset()` maps `preset` → config. Explicit parameter overrides (model, octree_resolution, num_inference_steps) take precedence over preset values.
 
-| Preset | Model | Octree | Steps | Max faces | Use case |
+| Preset | Model | Octree | Steps | Target faces | Label |
 |--------|-------|--------|-------|-----------|----------|
-| `low` | turbo | 256 | 10 | 10k | Web preview |
-| `medium` | turbo | 384 | 20 | 50k | Standard use |
-| `high` | full | 384 | 30 | 150k | High quality |
-| `ultra` | full | 512 | 50 | no limit | Production |
+| `low` | turbo | 256 | 10 | 10,000 | "Low — turbo, 10k faces, fast" |
+| `medium` | turbo | 384 | 20 | 50,000 | "Medium — turbo, 50k faces" |
+| `high` | full | 384 | 30 | 150,000 | "High — full model, 150k faces" |
+| `ultra` | full | 512 | 50 | 0 (no limit) | "Ultra — full model, max detail" |
+
+Default when no preset given: `target_faces=0, octree_resolution=384, num_inference_steps=30, model=turbo`.
 
 ---
 
 ## 5. REST API
 
-### Shape Generation
-```
-POST /api/generate-shape
-Content-Type: multipart/form-data
+### Authentication
+All endpoints accept `x_api_key` via HTTP header (`X-API-Key`). If `GPU_API_KEY` env is empty, all requests are allowed (open access). Verification uses `secrets.compare_digest` (timing-safe).
 
-Parameters:
-  - image: PNG/JPG file
-  - model: "turbo" | "fast" | "full" (default: "turbo")
-  - quality: "low" | "medium" | "high" | "ultra"
-  - steps: inference steps (overrides quality)
-  - seed: seed for reproducibility (default: random)
+Returns `HTTP 401` with `{"detail": "Invalid or missing API key"}` on failure.
+
+### POST /api/generate-shape
+Image → 3D mesh (shape only, no texture). Async job.
+
+**Content-Type**: `multipart/form-data`
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `image` | File (required) | — | PNG/JPG input image |
+| `output_subdir` | Form string | `"0"` | Subdirectory under WORK_DIR |
+| `target_faces` | Form int | `0` | Decimation target (0 = no decimation) |
+| `preset` | Form string | `""` | Quality preset: low/medium/high/ultra |
+| `model` | Form string | `""` | Shape model: turbo/fast/full |
+| `octree_resolution` | Form int | `0` | Octree resolution (0 = use preset/default 384) |
+| `num_inference_steps` | Form int | `0` | Steps (0 = use preset/default 30) |
+
+**Response** (200):
+```json
+{"job_id": "abc12345", "status": "running", "poll": "/api/jobs/abc12345"}
 ```
 
-### Text Generation
-```
-POST /api/generate-text
-Content-Type: application/json
+**Output files**: `mesh.glb`
 
+### POST /api/generate-text
+Text → image → shape → decimate → texture. Full pipeline. Async job.
+
+**Content-Type**: `multipart/form-data` (NOT JSON)
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `text_prompt` | Form string (required) | — | Text description of the 3D object |
+| `output_subdir` | Form string | `"0"` | Subdirectory under WORK_DIR |
+| `target_faces` | Form int | `0` | Decimation target (0 = no decimation) |
+| `preset` | Form string | `""` | Quality preset |
+| `model` | Form string | `""` | Shape model |
+| `octree_resolution` | Form int | `0` | Octree resolution |
+| `num_inference_steps` | Form int | `0` | Inference steps |
+
+**Response** (200):
+```json
+{"job_id": "abc12345", "status": "running", "poll": "/api/jobs/abc12345"}
+```
+
+**Output files**: `text2img_reference.png`, `textured.glb`, `mesh_uv.obj`, `texture_baked.png` (conditional), `mesh.glb`
+
+### POST /api/texture-mesh
+Apply texture to an existing mesh. Async job.
+
+**Content-Type**: `multipart/form-data`
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `mesh` | File (required) | — | `.glb` 3D mesh file |
+| `image` | File (required) | — | PNG/JPG texture reference image |
+| `output_subdir` | Form string | `"0"` | Subdirectory under WORK_DIR |
+
+**Response** (200):
+```json
+{"job_id": "abc12345", "status": "running", "poll": "/api/jobs/abc12345"}
+```
+
+**Output files**: `textured.glb`, `mesh_uv.obj`, `texture_baked.png` (conditional)
+
+### POST /api/generate-full
+Image → shape → decimate → texture. Full pipeline. Async job.
+
+**Content-Type**: `multipart/form-data`
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `image` | File (required) | — | PNG/JPG input image |
+| `output_subdir` | Form string | `"0"` | Subdirectory under WORK_DIR |
+| `target_faces` | Form int | `50000` | Decimation target (NOTE: default is 50k, not 0) |
+| `preset` | Form string | `""` | Quality preset |
+| `model` | Form string | `""` | Shape model |
+| `octree_resolution` | Form int | `0` | Octree resolution |
+| `num_inference_steps` | Form int | `0` | Inference steps |
+
+**Response** (200):
+```json
 {
-  "prompt": "describe the 3D object in detail",
-  "model": "turbo" | "fast" | "full",
-  "quality": "low" | "medium" | "high" | "ultra",
-  "seed": int (optional)
+  "job_id": "abc12345",
+  "status": "running",
+  "quality": "medium",
+  "target_faces": 50000,
+  "poll": "/api/jobs/abc12345",
+  "stream": "/api/jobs/abc12345/stream"
 }
 ```
 
-### Texturing
-```
-POST /api/texture-mesh
-Content-Type: multipart/form-data
+**Output files**: `textured.glb`, `mesh_uv.obj`, `texture_baked.png` (conditional), `mesh.glb`
 
-Parameters:
-  - mesh: .glb file (3D mesh)
-  - image: PNG/JPG file (texture reference)
-```
+### GET /api/jobs/{job_id}
+Poll job status.
 
-### Full Pipeline
-```
-POST /api/generate-full
-Content-Type: multipart/form-data
-
-Parameters:
-  - image: PNG/JPG file
-  - model: "turbo" | "fast" | "full"
-  - quality: preset
-  - texture_image: texture image (optional)
+**Response** (200, running):
+```json
+{"id": "abc12345", "type": "full-pipeline", "status": "running", "elapsed_s": 42.3, "log": ["[1/6] Loading..."]}
 ```
 
-### Status and Download
-```
-GET /api/jobs/{job_id}
-GET /api/jobs/{job_id}/files/{filename}
-GET /api/jobs/{job_id}/stream  (SSE)
+**Response** (200, completed):
+```json
+{
+  "id": "abc12345", "type": "full-pipeline", "status": "completed", "elapsed_s": 180.5,
+  "log": ["..."],
+  "files": [{"name": "textured.glb", "download": "/api/jobs/abc12345/files/textured.glb"}]
+}
 ```
 
-### Info
+**Response** (200, failed):
+```json
+{"id": "abc12345", "type": "full-pipeline", "status": "failed", "elapsed_s": 10.2, "log": ["..."], "error": "traceback..."}
 ```
-GET /api/health
-GET /api/models
-GET /api/presets
+
+**HTTP errors**: `404` (job not found)
+
+### GET /api/jobs/{job_id}/files/{filename}
+Download a result file.
+
+**HTTP errors**: `404` (job not found), `409` (job not yet completed), `404` (file not in job files list), `404` (file missing on disk)
+
+### GET /api/jobs/{job_id}/stream
+Server-Sent Events (SSE) for real-time progress.
+
+**Event types**:
+| Event | Data | When |
+|---|---|---|
+| `log` | Progress text line | Each new log entry |
+| `status` | `"running"` / `"completed"` / `"failed"` | Every poll cycle (2s) |
+| `done` | JSON: `{"status":"completed","elapsed_s":N,"files":[...]}` | Job finished |
+| `done` | JSON: `{"status":"failed","elapsed_s":N,"error":"..."}` | Job failed |
+| `error` | `"Job disappeared"` | Job removed from memory |
+
+**Poll interval**: 2 seconds.
+
+**Connection**: `text/event-stream` with headers `Cache-Control: no-cache`, `Connection: keep-alive`, `X-Accel-Buffering: no`.
+
+### GET /api/health
+**Response** (200):
+```json
+{
+  "status": "ok",
+  "api_key_required": false,
+  "gpu": "NVIDIA GeForce RTX 3090",
+  "vram_gb": 24.0,
+  "models": ["turbo", "fast", "full"],
+  "text_to_3d": "available (SDXL Turbo)"
+}
 ```
+
+### GET /api/models
+**Response** (200):
+```json
+{
+  "models": ["turbo", "fast"],
+  "default": "turbo",
+  "all": {"turbo": "hunyuan3d-dit-v2-0-turbo", "fast": "hunyuan3d-dit-v2-0-fast", "full": "hunyuan3d-dit-v2-0"}
+}
+```
+`models` lists only those with weights on disk. `all` shows the full map.
+
+### GET /api/presets
+**Response** (200): Returns the full `QUALITY_PRESETS` dictionary.
 
 ---
 
-## 6. Operational Notes
+## 6. Job System
 
-- Server runs as **root** via systemd
-- Source code edited from local Mac
+### Job lifecycle
+- Jobs are stored **in-memory** (`_jobs` dict). All jobs are **lost on server restart**.
+- Job ID: first 8 characters of a UUID4 (e.g., `"a1b2c3d4"`).
+- States: `running` → `completed` | `failed`
+- Each job tracks: `id`, `type`, `status`, `detail`, `created` (timestamp), `output_dir`, `files`, `error`, `log` (list of progress strings).
+
+### Job types
+| Type | Created by | Pipeline |
+|---|---|---|
+| `shape-image` | `/api/generate-shape` | Image → mesh |
+| `shape-text` | `/api/generate-text` | Text → image → mesh → texture |
+| `texture` | `/api/texture-mesh` | Mesh + image → textured mesh |
+| `full-pipeline` | `/api/generate-full` | Image → mesh → decimate → texture |
+
+### Background execution
+Jobs run via `asyncio.create_task()` wrapping `loop.run_in_executor(None, func, *args)` — the blocking inference runs in the default thread pool executor.
+
+### Output directory structure
+Each job writes to `WORK_DIR / output_subdir`:
+```
+output/
+└── web_0/                  # output_subdir value
+    ├── input.png           # uploaded image (generate-shape, generate-full)
+    ├── mesh.glb            # raw shape mesh
+    ├── textured.glb        # textured mesh (full/text pipelines)
+    ├── mesh_uv.obj         # UV-mapped mesh (full/text/texture pipelines)
+    ├── texture_baked.png   # extracted texture (conditional — may fail)
+    ├── text2img_reference.png  # SDXL-generated image (text pipeline only)
+    └── text2img_clean.png  # background-removed image (text pipeline only, not in download list)
+```
+
+**NOTE**: `texture_baked.png` extraction uses two fallback methods: first tries `textured.visual.material.image`, then `textured.visual.to_texture().image`. If both fail, the file is silently omitted from the files list.
+
+---
+
+## 7. Decimation System
+
+### Adaptive curvature-aware decimation
+`_decimate_mesh()` → `_adaptive_decimate()` implements smart polygon reduction:
+
+1. **Curvature analysis** (`_compute_vertex_curvature`): computes per-vertex curvature via face normal variance. Classifies vertices as high-detail (curvature > 0.3).
+2. **Face classification**: faces where ANY vertex has curvature > 0.25 are "protected".
+3. **If protected faces ≥ target**: falls back to gentle uniform decimation (aggressiveness=3).
+4. **Otherwise**: uses `pyfqmr` with aggressiveness=4, preserve_border=True, max_iterations=100.
+5. **Post-decimation check**: re-computes curvature to verify detail preservation.
+
+### Fallback chain
+1. `pyfqmr` adaptive (curvature-aware) → 2. `pyfqmr` uniform → 3. `trimesh.simplify_quadric_decimation` → 4. Return original mesh.
+
+---
+
+## 8. Operational Notes
+
+- Server runs as **root** via systemd.
+- Source code edited from local Mac, pushed via git.
 - After `git pull` on glorfindel: `sudo systemctl daemon-reload && sudo systemctl restart vision3d`
-- Web UI embedded in `server.py` (inline HTML at root endpoint `/`)
-- Web UI has 2 tabs: "Image → 3D" and "Text → 3D"
-- GLB results displayed in interactive 3D viewer (`<model-viewer>`, orbit controls)
-- Use `.venv/bin/python -m pip` on glorfindel (pip's shebang may be broken)
+- Web UI embedded in `server.py` (inline HTML, ~380 lines at `_WEB_UI_HTML`).
+- Web UI has 2 tabs: "Image → 3D" and "Text → 3D".
+- Web UI supports API key via URL query param: `http://glorfindel:8000/?key=YOUR_KEY`.
+- GLB results displayed in interactive 3D viewer (`<model-viewer>` v3.5.0, orbit controls).
+- Use `.venv/bin/python -m pip` on glorfindel (pip's shebang may be broken).
+
+### Background removal
+Automatic background removal is triggered when the input image has **less than 5% transparent pixels** (alpha channel < 10). Uses `hy3dgen.rembg.BackgroundRemover`. If rembg is not installed, the step is silently skipped.
 
 ---
 
-## 7. Integration with Other Projects
+## 9. Integration with Other Projects
 
 ```
 vision3d (FastAPI on glorfindel)
@@ -210,12 +414,12 @@ Claude Code / Claude Desktop (local Mac)
 
 **Locations**:
 - `vision3d`: `/home/flame/ai-studio/vision3d/` (glorfindel)
-- `maya-mcp`: `~/Claude_projects/maya-mcp-project/` (Mac)
+- `maya-mcp`: `~/Claude_projects/maya-mcp/` (Mac)
 - `fpt-mcp`: `~/Claude_projects/fpt-mcp/` (Mac)
 
 ---
 
-## 8. Development and Deployment
+## 10. Development and Deployment
 
 ### After git pull on glorfindel
 ```bash
@@ -227,31 +431,76 @@ cd ~/ai-studio/vision3d && git pull && sudo systemctl restart vision3d && sudo j
 ```bash
 cd ~/ai-studio/vision3d/
 .venv/bin/python server.py --port 8000
+.venv/bin/python server.py --port 8000 --reload   # auto-reload mode
 ```
 
 ### Code Structure (server.py)
 
-**Main functions**:
-- `_get_shape_pipeline(model)` — Load shape model
-- `_get_paint_pipeline()` — Load paint model
-- `_load_t2i_pipeline()` — Load SDXL Turbo
-- `_unload_t2i_pipeline()` — Unload SDXL Turbo from VRAM
-- `_unload_shape_pipeline()` — Unload shape model from VRAM
-- `_run_shape_from_image()` — Process image-to-3D
-- `_run_shape_from_text()` — Process text-to-3D (3 phases)
-- `_run_texture()` — Apply texture to mesh
-- `_run_full_pipeline()` — Shape + texture in one step
-- `_decimate_mesh()` — Reduce polygon count
+**Configuration** (lines 1-60): env vars, paths, constants.
+
+**Job tracking** (lines 62-99): `_new_job`, `_job_log`, `_job_done`, `_job_fail` — in-memory dict.
+
+**Authentication** (lines 101-109): `_verify_api_key` with `secrets.compare_digest`.
+
+**Pipeline loaders** (lines 112-260):
+- `_get_shape_pipeline(model)` — Load/swap shape model (cached, model-aware)
+- `_get_paint_pipeline()` — Load paint model (cached, never unloaded)
+- `_load_t2i_pipeline()` — Load SDXL Turbo to GPU
+- `_unload_t2i_pipeline()` — Unload SDXL Turbo (cpu → del → gc → empty_cache)
+- `_unload_shape_pipeline()` — Unload shape model (del → gc → empty_cache)
+
+**Inference functions** (lines 263-905):
+- `_run_shape_from_image()` — Image-to-3D (5 steps: load → image → shape → decimate → save)
+- `_run_shape_from_text()` — Text-to-3D (8 steps: SDXL → rembg → shape → decimate → texture → save)
+- `_run_texture()` — Texture painting (4 steps: load → mesh → paint → save)
+- `_run_full_pipeline()` — Full pipeline (6 steps: shape → rembg → generate → decimate → paint → save)
+
+**Decimation** (lines 550-729):
+- `_compute_vertex_curvature()` — Per-vertex curvature via face normal variance
+- `_adaptive_decimate()` — Curvature-aware decimation with pyfqmr
+- `_uniform_decimate()` — Simple decimation fallback
+- `_decimate_mesh()` — Entry point (delegates to adaptive)
+
+**Quality presets** (lines 493-547): `QUALITY_PRESETS` dict and `_resolve_preset()`.
+
+**FastAPI endpoints** (lines 924-1233): All REST endpoints.
+
+**Web UI** (lines 1236-1626): Embedded HTML/CSS/JS.
+
+**Entry point** (lines 1629-1646): argparse + uvicorn.run.
 
 ---
 
-## 9. Key Points to Remember
+## 11. Key Points to Remember
 
 1. **text-to-3D needs an intermediate image**: Never pass `text=` directly to the shape pipeline.
-2. **Shape models are stateful**: Loading is expensive. Cached in `_shape_pipeline`.
-3. **GPU has memory limits**: `ultra` preset may require 24 GB+ VRAM.
-4. **Systemd manages the lifecycle**: Don't use `kill -9`, use `systemctl restart`.
-5. **API key is optional**: Leave `GPU_API_KEY=""` for open access during development.
-6. **Output in `GPU_WORK_DIR`**: Defaults to `./output`, organized by `job_id`.
-7. **SDXL Turbo auto-downloads**: First text-to-3D run downloads ~6 GB.
-8. **Text-to-3D dependencies**: `diffusers`, `transformers`, `accelerate` must be in the venv.
+2. **text-to-3D produces textured output**: Unlike generate-shape, generate-text runs the full 3-phase pipeline including texturing.
+3. **Shape models are stateful**: Loading is expensive. Cached in `_shape_pipeline`. Swapping models requires unloading the current one.
+4. **GPU has memory limits**: `ultra` preset may require 24 GB+ VRAM.
+5. **Systemd manages the lifecycle**: Don't use `kill -9`, use `systemctl restart`.
+6. **API key is optional**: Leave `GPU_API_KEY=""` for open access during development.
+7. **Output in `GPU_WORK_DIR`**: Defaults to `./output`, organized by `output_subdir`.
+8. **SDXL Turbo auto-downloads**: First text-to-3D run downloads ~6 GB from HuggingFace.
+9. **Text-to-3D dependencies**: `diffusers`, `transformers`, `accelerate` must be in the venv.
+10. **Jobs are in-memory**: All job state is lost on server restart.
+11. **No concurrent job protection**: Multiple simultaneous GPU jobs will cause OOM.
+12. **generate-text uses Form data**: NOT JSON — all params are multipart/form-data.
+13. **generate-full default is 50k faces**: Unlike generate-shape (default 0), generate-full defaults to 50,000 target_faces.
+
+---
+
+## 12. Known Issues and Potential Bugs
+
+1. **`_resolve_preset` target_faces override bug**: Line 539 — `if target_faces >= 0 and not preset:` means explicit `target_faces` is **ignored** when a `preset` is also provided, because `not preset` evaluates False. To override target_faces with a preset, this condition needs fixing.
+
+2. **No job cleanup / memory leak**: `_jobs` dict grows forever. Long-running server accumulates jobs in memory with no TTL or eviction. Includes full log history per job.
+
+3. **No concurrent job protection**: Nothing prevents launching multiple GPU jobs simultaneously. With 24 GB VRAM, two concurrent pipelines will cause silent OOM or CUDA errors.
+
+4. **SSE auth bypass from Web UI**: The SSE endpoint expects `x_api_key` as an HTTP header, but `EventSource` (used by the Web UI) does not support custom headers. The Web UI appends `?x_api_key=` as a query parameter, which FastAPI does **not** read as a Header. When `GPU_API_KEY` is set, SSE streaming from the Web UI will fail with 401.
+
+5. **No input validation**: No MIME type checking on uploaded files. No file size limits. No sanitization of `output_subdir` (potential path traversal with values like `../../etc`).
+
+6. **output_subdir collision**: If two jobs use the same `output_subdir`, files overwrite each other (e.g., `input.png`, `mesh.glb`).
+
+7. **texture_baked.png is conditional**: The texture extraction can silently fail (caught exceptions with `pass`). Callers should not assume this file will always be present.
