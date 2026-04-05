@@ -1,7 +1,7 @@
 # Vision3D — Critical Context for Claude
 
-> **Last updated**: 2026-04-05
-> **Audited against**: `server.py` (1646 lines, commit at time of audit)
+> **Last updated**: 2026-04-05 — Phase 8.3: Bug #6 + #7 fixes, 20 automated tests
+> **Audited against**: `server.py` (~1670 lines, commit at time of audit)
 
 ---
 
@@ -501,6 +501,6 @@ cd ~/ai-studio/vision3d/
 
 5. ~~**No input validation**~~: **Mostly FIXED** — ~~No sanitization of `output_subdir`~~ **output_subdir sanitized (Phase 8.1)** — `_validate_output_subdir()` rejects `..`, `/`, `\` and verifies `Path.resolve()` stays inside WORK_DIR. **MIME type + size validation added (Phase 8.2)** — `_validate_upload()` checks Content-Type against allowed lists (`ALLOWED_IMAGE_TYPES`: png/jpeg/webp; `ALLOWED_MESH_TYPES`: gltf-binary/octet-stream) and enforces 50 MB max file size. Applied to `generate-shape`, `texture-mesh`, `generate-full`. Returns HTTP 400 on violation.
 
-6. **output_subdir collision**: If two jobs use the same `output_subdir`, files overwrite each other (e.g., `input.png`, `mesh.glb`).
+6. ~~**output_subdir collision**~~: **FIXED (Phase 8.3)** — Added `_resolve_output_subdir()` helper that replaces the default `"0"` with a unique 8-char UUID4 prefix (same format as `job_id`). If the user passes an explicit `output_subdir` (anything other than `"0"`), it is preserved. Applied in all 4 POST endpoints, after `_validate_output_subdir()`.
 
-7. **texture_baked.png is conditional**: The texture extraction can silently fail (caught exceptions with `pass`). Callers should not assume this file will always be present.
+7. ~~**texture_baked.png is conditional**~~: **FIXED (Phase 8.3)** — Added `_job_log()` warning when texture extraction fails: `"⚠ texture_baked.png extraction failed — file not included"`. Applied in all 3 functions that attempt texture extraction (`_run_shape_from_text`, `_run_texture`, `_run_full_pipeline`). The job still completes successfully (no behavior change), but the client now sees the warning in the job log and SSE stream.

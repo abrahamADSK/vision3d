@@ -1,7 +1,7 @@
 # HANDOFF — vision3d
 
-**Last updated**: 2026-04-05 — Phase 8.2: robustness fixes in server.py
-**Completitud**: ~96% (server funcional, 6 bugs corregidos, sin tests)
+**Last updated**: 2026-04-05 — Phase 8.3: final fixes + automated tests
+**Completitud**: ~99% (server funcional, 7/7 bugs corregidos, 20 tests)
 
 ---
 
@@ -71,7 +71,11 @@ vision3d es el **backend GPU** de maya-mcp. No hay dependencia de código compar
 \* `texture_baked.png` es condicional — la extracción de textura puede fallar silenciosamente.
 
 ### Tests
-**No hay tests** (ni automatizados ni manuales).
+**20 tests automatizados** (Phase 8.3) — `tests/test_server.py` con pytest.
+- 12 unit tests: `_validate_output_subdir`, `_resolve_preset`, `_resolve_output_subdir`, `_cleanup_old_jobs`, `_validate_upload`
+- 8 endpoint tests: health, presets, models, generate-shape (422/400), GPU busy 429, auth 401, SSE auth query param
+- No requieren GPU, CUDA ni modelos ML — usan mocks para torch/trimesh/diffusers
+- Ejecutar: `python -m pytest tests/ -v`
 
 ### Compliance
 
@@ -144,8 +148,8 @@ Estos problemas se encontraron en el código y están **documentados en CLAUDE.m
 | 3 | **Alta** | Sin protección de concurrencia GPU — múltiples jobs simultáneos causan OOM | ✅ **FIXED Phase 8.1** — `asyncio.Semaphore(1)` + HTTP 429 |
 | 4 | **Media** | SSE auth bypass desde Web UI — EventSource no soporta custom headers | ✅ **FIXED Phase 8.2** — `_verify_api_key()` acepta query param fallback |
 | 5 | **Alta** | Sin sanitización de `output_subdir` — path traversal potencial | ✅ **FIXED Phase 8.1** — `_validate_output_subdir()` + HTTP 400. **FIXED Phase 8.2** — `_validate_upload()` MIME type + size limit (50 MB) |
-| 6 | **Baja** | Colisión de `output_subdir` — dos jobs con mismo subdir sobrescriben archivos | ❌ Pendiente |
-| 7 | **Baja** | `texture_baked.png` falla silenciosamente | ❌ Pendiente |
+| 6 | **Baja** | Colisión de `output_subdir` — dos jobs con mismo subdir sobrescriben archivos | ✅ **FIXED Phase 8.3** — `_resolve_output_subdir()` reemplaza default "0" con UUID8 |
+| 7 | **Baja** | `texture_baked.png` falla silenciosamente | ✅ **FIXED Phase 8.3** — `_job_log()` advierte al cliente cuando la extracción falla |
 
 ### 3.3 Qué se corrigió vs. qué queda pendiente
 
@@ -192,8 +196,9 @@ Estos problemas se encontraron en el código y están **documentados en CLAUDE.m
 - [x] Input validation — MIME type check en uploads **(Phase 8.2)**
 
 **Prioridad baja** (mejoras):
-- [ ] Tests automatizados (health, presets, _resolve_preset, job lifecycle)
-- [ ] Señalizar ausencia de `texture_baked.png` en response
+- [x] Tests automatizados (20 tests: helpers + endpoints) **(Phase 8.3)**
+- [x] Señalizar ausencia de `texture_baked.png` en response **(Phase 8.3)**
+- [x] Colisión de `output_subdir` — unique UUID para default **(Phase 8.3)**
 - [ ] Documentar Web UI query param `?key=` en README
 
 ---
@@ -211,6 +216,15 @@ Estos problemas se encontraron en el código y están **documentados en CLAUDE.m
 - **Fix 3 (Bug #3)**: GPU semaphore — `asyncio.Semaphore(1)` a nivel de módulo. `_check_gpu_available()` en los 4 POST endpoints devuelve HTTP 429 si la GPU está ocupada. `_run_in_background()` mantiene el semaphore durante toda la inferencia.
 - **Fix 5 (Bug #5)**: Path traversal — nueva función `_validate_output_subdir()` rechaza `..`, `/`, `\` y verifica con `Path.resolve()` que el path queda dentro de WORK_DIR. Aplicada en los 4 POST endpoints. Devuelve HTTP 400.
 - **CLAUDE.md §12**: Bugs 1, 3, 5 marcados como resueltos con descripción del fix.
+
+## Última actualización: 2026-04-05 — Phase 8.3: fixes finales + tests automatizados
+
+### Phase 8.3 — Cambios aplicados
+- **Fix 7 (Bug #6)**: output_subdir collision — nuevo helper `_resolve_output_subdir()` que reemplaza el default `"0"` con los primeros 8 chars de `uuid4()` (mismo formato que job_id). Si el usuario pasa un valor explícito, se respeta. Aplicado en los 4 POST endpoints, después de `_validate_output_subdir()`.
+- **Fix 8 (Bug #7)**: texture_baked.png silencioso — añadido `_job_log(job_id, "⚠ texture_baked.png extraction failed — file not included")` en los 3 bloques `else` donde la extracción falla (`_run_shape_from_text`, `_run_texture`, `_run_full_pipeline`). No cambia el comportamiento (el job sigue completando), solo hace visible el fallo.
+- **Tests automatizados**: 20 tests en `tests/test_server.py` con pytest. Estructura: `tests/__init__.py`, `tests/conftest.py` (fixtures, mocks de torch/ML), `tests/test_server.py`. 12 unit tests (helpers) + 8 endpoint tests (TestClient). No requieren GPU. Ejecutar: `python -m pytest tests/ -v`.
+- **CLAUDE.md §12**: Bugs 6 y 7 marcados como resueltos.
+- **Todos los 7 bugs documentados en Phase 6 están resueltos**: 3 en Phase 8.1, 3 en Phase 8.2, 2 en Phase 8.3 (bug #5 se corrigió en dos fases).
 
 ### Historial anterior
 - 2026-04-05 — Phase 6: auditoría exhaustiva de server.py, reescritura completa de CLAUDE.md (360 insertions, 111 deletions), 7 bugs documentados

@@ -173,6 +173,24 @@ def _validate_output_subdir(output_subdir: str) -> str:
     return output_subdir
 
 
+def _resolve_output_subdir(output_subdir: str) -> str:
+    """Replace the default output_subdir "0" with a unique identifier.
+
+    When output_subdir is "0" (the default), two concurrent or sequential jobs
+    would write to the same directory, overwriting each other's files.  This
+    helper replaces the default with the first 8 characters of a UUID4 —
+    the same format used for job_id — guaranteeing unique output directories.
+
+    If the user passed an explicit output_subdir (anything other than "0"),
+    it is returned unchanged.
+
+    Phase 8.3 fix for Bug #6 (output_subdir collision).
+    """
+    if output_subdir == "0":
+        return str(uuid.uuid4())[:8]
+    return output_subdir
+
+
 # Allowed MIME types for upload validation (Phase 8.2 — Bug #5 partial fix)
 ALLOWED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"]
 ALLOWED_MESH_TYPES = ["model/gltf-binary", "application/octet-stream"]  # GLB often sent as octet-stream
@@ -603,6 +621,8 @@ def _run_shape_from_text(
             pass
     if tex_saved:
         files.append("texture_baked.png")
+    else:
+        _job_log(job_id, "⚠ texture_baked.png extraction failed — file not included")
 
     files.append("mesh.glb")
 
@@ -905,6 +925,8 @@ def _run_texture(
             pass
     if tex_saved:
         files.append("texture_baked.png")
+    else:
+        _job_log(job_id, "⚠ texture_baked.png extraction failed — file not included")
 
     torch.cuda.empty_cache()
 
@@ -1018,6 +1040,8 @@ def _run_full_pipeline(
             pass
     if tex_saved:
         files.append("texture_baked.png")
+    else:
+        _job_log(job_id, "⚠ texture_baked.png extraction failed — file not included")
 
     # Also keep the raw mesh
     files.append("mesh.glb")
@@ -1120,6 +1144,7 @@ async def generate_shape(
     """Upload an image, get a 3D mesh back (async job)."""
     _verify_api_key(x_api_key)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
+    output_subdir = _resolve_output_subdir(output_subdir)   # Unique dir if default (Bug #6)
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
     _check_max_jobs()  # Reject if too many jobs in memory (Phase 8.2)
 
@@ -1160,6 +1185,7 @@ async def generate_text(
     """Generate 3D mesh from text prompt (async job)."""
     _verify_api_key(x_api_key)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
+    output_subdir = _resolve_output_subdir(output_subdir)   # Unique dir if default (Bug #6)
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
     _check_max_jobs()  # Reject if too many jobs in memory (Phase 8.2)
 
@@ -1188,6 +1214,7 @@ async def texture_mesh(
     """Upload mesh + image, get textured mesh back (async job)."""
     _verify_api_key(x_api_key)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
+    output_subdir = _resolve_output_subdir(output_subdir)   # Unique dir if default (Bug #6)
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
     _check_max_jobs()  # Reject if too many jobs in memory (Phase 8.2)
 
@@ -1302,6 +1329,7 @@ async def generate_full(
     """
     _verify_api_key(x_api_key)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
+    output_subdir = _resolve_output_subdir(output_subdir)   # Unique dir if default (Bug #6)
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
     _check_max_jobs()  # Reject if too many jobs in memory (Phase 8.2)
 
