@@ -1,5 +1,13 @@
 # Vision3D
 
+> GPU inference server for AI-powered 3D asset generation using Hunyuan3D-2
+
+> [!WARNING]
+> **Experimental project — use at your own risk.**
+> This is an independent, unofficial experiment created with [Claude Code](https://claude.com/claude-code). It is **not** affiliated with, endorsed by, or officially supported by Tencent (Hunyuan3D-2) or Stability AI (SDXL Turbo) in any way. All model names and trademarks belong to their respective owners.
+>
+> Running AI inference pipelines on GPU hardware carries real risks: **high VRAM usage, potential system instability, large model downloads, and non-deterministic outputs.** Always monitor GPU resources and validate outputs before using in production. The author(s) accept no responsibility for hardware issues, incorrect results, or any other damage resulting from its use.
+
 AI-powered 3D model generation server. Turns images (or text prompts) into textured 3D meshes using GPU inference.
 
 Built on [Hunyuan3D-2](https://github.com/Tencent/Hunyuan3D-2) (Tencent) for shape and texture generation, and [SDXL Turbo](https://huggingface.co/stabilityai/sdxl-turbo) (Stability AI) for the intermediate image generation step in the text-to-3D flow. Exposed as a REST API with a web UI, real-time progress streaming, and automatic polygon decimation.
@@ -178,9 +186,18 @@ Browser / MCP client / curl
 | `hunyuan3d-delight-v2-0` | Tencent/Hunyuan3D-2 | ~4 GB | Relighting (paint dependency) |
 | `sdxl-turbo` | Stability AI | ~6 GB | Text → image (intermediate step) |
 
-## Integration with maya-mcp
+## Ecosystem
 
-Vision3D works standalone or as the GPU backend for [maya-mcp](https://github.com/abrahamADSK/maya-mcp). In that setup, maya-mcp calls Vision3D's API to generate 3D assets and imports them into Autodesk Maya.
+`vision3d` is part of a four-component VFX pipeline. Each component has a defined role:
+
+| Repo | Role |
+|------|------|
+| [flame-mcp](https://github.com/abrahamADSK/flame-mcp) | Controls Autodesk Flame for compositing, conform, and finishing |
+| [maya-mcp](https://github.com/abrahamADSK/maya-mcp) | Controls Autodesk Maya for 3D modeling, animation, and rendering |
+| [fpt-mcp](https://github.com/abrahamADSK/fpt-mcp) | Connects to Autodesk Flow Production Tracking (ShotGrid) for production tracking, asset management, and publishes |
+| [vision3d](https://github.com/abrahamADSK/vision3d) | GPU inference server for AI-powered 3D generation — the remote backend for maya-mcp's image-to-3D and text-to-3D tools |
+
+`vision3d` is the GPU computation layer of the ecosystem. It exposes no MCP interface directly — its primary consumer is `maya-mcp`, which submits generation jobs via HTTP and imports the resulting `.glb` files into Maya. `flame-mcp` and `fpt-mcp` do not connect to `vision3d`.
 
 ## License
 
