@@ -24,9 +24,13 @@ Built on [Hunyuan3D-2](https://github.com/Tencent/Hunyuan3D-2) (Tencent) for sha
 
 ## Requirements
 
-- NVIDIA GPU with 16+ GB VRAM (tested on RTX 3090, 24 GB)
+- **GPU** — one of:
+  - NVIDIA GPU with 16+ GB VRAM (CUDA — tested on RTX 3090, 24 GB)
+  - Apple Silicon Mac with 16+ GB unified RAM (MPS — tested on M4 Pro / M5 Pro)
 - Python 3.10+
-- [Hunyuan3D-2](https://github.com/Tencent/Hunyuan3D-2) installed in a venv with model weights downloaded
+- **Hunyuan3D-2**:
+  - CUDA: [Tencent/Hunyuan3D-2](https://github.com/Tencent/Hunyuan3D-2) (original fork) + turbo model
+  - MPS: [Maxim-Lanskoy/Hunyuan3D-2-Mac](https://github.com/Maxim-Lanskoy/Hunyuan3D-2-Mac) (Mac fork) + base model v2-0 (turbo requires a scheduler not available in the Mac fork)
 - [SDXL Turbo](https://huggingface.co/stabilityai/sdxl-turbo) (~6 GB, auto-downloaded on first text-to-3D use)
 - `diffusers`, `transformers`, `accelerate` (for SDXL Turbo text-to-image)
 - `rembg` + `onnxruntime` (background removal for text-to-3D)
@@ -41,49 +45,22 @@ git clone https://github.com/abrahamADSK/vision3d.git
 cd vision3d
 ```
 
-### 2. Install Hunyuan3D-2 (prerequisite)
-
-Vision3D uses Hunyuan3D-2 for inference. Clone it inside the vision3d directory and create a shared venv:
+### 2. Install
 
 ```bash
-python3 -m venv .venv
-git clone https://github.com/Tencent/Hunyuan3D-2.git
-.venv/bin/pip install -e Hunyuan3D-2/
+bash install.sh
 ```
 
-### 3. Compile custom_rasterizer (required for texturing)
+`install.sh` detects your platform (CUDA / MPS / CPU) automatically and handles:
+- Creating a `.venv/` virtual environment
+- Installing all dependencies from `requirements.txt`
+- Finding and installing the correct Hunyuan3D-2 fork in editable mode
+- Installing mesh-processing extras (pymeshlab, xatlas, etc.)
+- Verifying all critical imports and torch backend
 
-The paint pipeline depends on a C++ extension that must be compiled from source:
+Safe to run multiple times (idempotent).
 
-```bash
-.venv/bin/pip install ./Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer
-```
-
-### 4. Download model weights
-
-**Hunyuan3D-2** (~10 GB — shape and texture generation):
-
-```bash
-.venv/bin/python -c "
-from huggingface_hub import snapshot_download
-snapshot_download('tencent/Hunyuan3D-2', allow_patterns='hunyuan3d-dit-v2-0-turbo/*')
-snapshot_download('tencent/Hunyuan3D-2', allow_patterns='hunyuan3d-paint-v2-0-turbo/*')
-"
-```
-
-Move or symlink the downloaded weights into `hf_models/` inside the vision3d directory, or set `GPU_MODELS_DIR` to point at wherever they were downloaded.
-
-**SDXL Turbo** (~6 GB — required for text-to-3D):
-
-Downloaded automatically from HuggingFace on first text-to-3D use. No manual action needed. The model is cached in `~/.cache/huggingface/`.
-
-### 5. Install Vision3D dependencies
-
-```bash
-.venv/bin/python -m pip install -r requirements.txt
-```
-
-### 6. Run
+### 3. Run
 
 ```bash
 .venv/bin/python server.py --host 0.0.0.0 --port 8000
@@ -91,7 +68,15 @@ Downloaded automatically from HuggingFace on first text-to-3D use. No manual act
 
 Open `http://YOUR_GPU_HOST:8000` in a browser.
 
-### 7. (Optional) Install as systemd service
+### Apple Silicon (MPS) notes
+
+- The Mac fork is [Maxim-Lanskoy/Hunyuan3D-2-Mac](https://github.com/Maxim-Lanskoy/Hunyuan3D-2-Mac). Clone it **outside** the vision3d repo — `install.sh` searches for it in `../hunyuan3d-mac`, `~/Projects/hunyuan3d-mac`, and `~/Claude_projects/hunyuan3d-mac`.
+- Uses the base model `hunyuan3d-dit-v2-0` (not turbo) with `variant='fp16'`, `use_safetensors=True`.
+- Weights are downloaded automatically from HuggingFace on first run (~18.8 GB for `hunyuan3d-dit-v2-0`).
+- `custom_rasterizer` is **not** needed on MPS — texturing is not yet supported on Mac (shape generation only).
+- Generation verified: 355k vertices, 710k faces.
+
+### 4. (Optional) Install as systemd service
 
 ```bash
 sudo bash setup.sh
@@ -173,7 +158,9 @@ Browser / MCP client / curl
    └──────┬──────┘
           │
    ┌──────▼──────┐
-   │  NVIDIA GPU  │  CUDA inference
+   │  NVIDIA GPU  │  CUDA inference (shape + texture)
+   │  — or —      │
+   │  Apple GPU   │  MPS inference (shape only)
    └─────────────┘
 ```
 
@@ -181,19 +168,23 @@ Browser / MCP client / curl
 
 | Model | Source | Size | Function |
 |-------|--------|------|----------|
-| `hunyuan3d-dit-v2-0-turbo` | Tencent/Hunyuan3D-2 | ~400 MB | 3D shape generation |
-| `hunyuan3d-paint-v2-0-turbo` | Tencent/Hunyuan3D-2 | ~14 GB | Texture painting |
+| `hunyuan3d-dit-v2-0-turbo` | Tencent/Hunyuan3D-2 | ~400 MB | 3D shape generation (CUDA — turbo) |
+| `hunyuan3d-dit-v2-0` | Tencent/Hunyuan3D-2 | ~18.8 GB | 3D shape generation (MPS — base model) |
+| `hunyuan3d-paint-v2-0-turbo` | Tencent/Hunyuan3D-2 | ~14 GB | Texture painting (CUDA only) |
 | `hunyuan3d-delight-v2-0` | Tencent/Hunyuan3D-2 | ~4 GB | Relighting (paint dependency) |
 | `sdxl-turbo` | Stability AI | ~6 GB | Text → image (intermediate step) |
+
+> **Note:** The turbo shape model is not compatible with MPS — it requires `ConsistencyFlowMatchEulerDiscreteScheduler`, which is not available in the Mac fork. On Apple Silicon, `server.py` automatically selects the base `v2-0` model.
 
 ## Project Structure
 
 ```
 vision3d/
-├── server.py          # MCP server — FastMCP entry point and all tools
+├── server.py          # FastAPI server — all endpoints, pipelines, and web UI
+├── install.sh         # Automated installer (CUDA/MPS/CPU detection, venv, deps)
+├── setup.sh           # GPU deployment script (systemd service, API key, glorfindel)
 ├── requirements.txt   # Python dependencies
-├── setup.sh           # Environment setup and Hunyuan3D-2 installation script
-└── .env.example       # Environment variables template (CHECKPOINT_DIR, etc.)
+└── .env.example       # Environment variables template
 ```
 
 ## Troubleshooting
@@ -208,9 +199,17 @@ vision3d/
 - Verify weights are in the path specified by `CHECKPOINT_DIR` in your environment
 
 **Server starts but generation fails**
-- Check that `custom_rasterizer` compiled successfully (required for texturing)
+- Check that `custom_rasterizer` compiled successfully (required for texturing on CUDA)
 - Verify Hunyuan3D-2 installation: `python -c "from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline"`
 - Check server logs for stack traces
+
+**MPS: turbo model not loading**
+- The turbo model requires `ConsistencyFlowMatchEulerDiscreteScheduler`, which does not exist in the Mac fork
+- Use the base model `hunyuan3d-dit-v2-0` instead — `server.py` selects it automatically on MPS
+
+**MPS: texturing not available**
+- `custom_rasterizer` does not compile on macOS — texturing is CUDA-only for now
+- Shape generation works fully on MPS
 
 ## Ecosystem
 
