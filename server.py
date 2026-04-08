@@ -38,6 +38,30 @@ import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Header, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
+# ── Device detection ─────────────────────────────────────────────────────────
+
+import torch as _torch_init
+
+if _torch_init.cuda.is_available():
+    DEVICE = "cuda"
+elif hasattr(_torch_init.backends, "mps") and _torch_init.backends.mps.is_available():
+    DEVICE = "mps"
+else:
+    DEVICE = "cpu"
+
+del _torch_init  # avoid keeping a top-level torch reference
+
+
+def _clear_device_cache():
+    """Clear GPU/MPS memory cache (replaces direct torch.cuda.empty_cache calls)."""
+    import torch
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    elif DEVICE == "mps":
+        torch.mps.empty_cache()
+
+
 # ── Configuration ────────────────────────────────────────────────────────────
 
 API_KEY = os.environ.get("GPU_API_KEY", "")
@@ -280,7 +304,7 @@ def _get_available_models():
     return available
 
 
-def _get_shape_pipeline(model_name: str = "turbo"):
+def _get_shape_pipeline(model_name: str = "full" if DEVICE == "mps" else "turbo"):
     """Load shape pipeline by model name. Swaps models if a different one is requested."""
     import torch
     global _shape_pipeline, _shape_pipeline_name
@@ -300,7 +324,7 @@ def _get_shape_pipeline(model_name: str = "turbo"):
         del _shape_pipeline
         _shape_pipeline = None
         _shape_pipeline_name = None
-        torch.cuda.empty_cache()
+        _clear_device_cache()
 
     from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
 
@@ -309,12 +333,14 @@ def _get_shape_pipeline(model_name: str = "turbo"):
     if os.path.isdir(path) and os.path.exists(model_file):
         print(f"[Shape] Loading {model_name} from local: {path}")
         _shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-            MODELS_DIR, subfolder=subfolder
+            MODELS_DIR, subfolder=subfolder,
+            variant='fp16', use_safetensors=True, device=DEVICE
         )
     else:
         print(f"[Shape] Loading {model_name} from HuggingFace Hub...")
         _shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-            "tencent/Hunyuan3D-2", subfolder=subfolder
+            "tencent/Hunyuan3D-2", subfolder=subfolder,
+            variant='fp16', use_safetensors=True, device=DEVICE
         )
 
     _shape_pipeline_name = model_name
@@ -336,26 +362,32 @@ def _unload_shape_pipeline():
     _shape_pipeline_name = None
     gc.collect()
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+    _clear_device_cache()
     print("[Shape] VRAM freed.")
 
 
 def _get_paint_pipeline():
     global _paint_pipeline
     if _paint_pipeline is None:
-        from hy3dgen.texgen.pipelines import Hunyuan3DPaintPipeline
+        try:
+            from hy3dgen.texgen.pipelines import Hunyuan3DPaintPipeline
 
-        if os.path.isdir(MODELS_DIR):
-            print(f"[Paint] Loading from local: {MODELS_DIR}")
-            _paint_pipeline = Hunyuan3DPaintPipeline.from_pretrained(
-                MODELS_DIR, subfolder="hunyuan3d-paint-v2-0-turbo"
-            )
-        else:
-            print("[Paint] Loading from HuggingFace Hub...")
-            _paint_pipeline = Hunyuan3DPaintPipeline.from_pretrained(
-                "tencent/Hunyuan3D-2", subfolder="hunyuan3d-paint-v2-0-turbo"
-            )
+            if os.path.isdir(MODELS_DIR):
+                print(f"[Paint] Loading from local: {MODELS_DIR}")
+                _paint_pipeline = Hunyuan3DPaintPipeline.from_pretrained(
+                    MODELS_DIR, subfolder="hunyuan3d-paint-v2-0-turbo"
+                )
+            else:
+                print("[Paint] Loading from HuggingFace Hub...")
+                _paint_pipeline = Hunyuan3DPaintPipeline.from_pretrained(
+                    "tencent/Hunyuan3D-2", subfolder="hunyuan3d-paint-v2-0-turbo"
+                )
+        except Exception as e:
+            if DEVICE == "mps":
+                print(f"[Paint] WARNING: Paint pipeline unavailable on MPS ({e}). "
+                      "Texturing will be skipped.")
+                return None
+            raise
     return _paint_pipeline
 
 
@@ -370,13 +402,14 @@ def _load_t2i_pipeline():
     from diffusers import AutoPipelineForText2Image
 
     print(f"[T2I] Loading SDXL Turbo from {T2I_MODEL}...")
+    dtype = torch.float16 if DEVICE != "cpu" else torch.float32
     _t2i_pipeline = AutoPipelineForText2Image.from_pretrained(
         T2I_MODEL,
-        torch_dtype=torch.float16,
-        variant="fp16",
+        torch_dtype=dtype,
+        variant="fp16" if dtype == torch.float16 else None,
     )
-    _t2i_pipeline.to("cuda")
-    print("[T2I] SDXL Turbo loaded on GPU.")
+    _t2i_pipeline.to(DEVICE)
+    print(f"[T2I] SDXL Turbo loaded on {DEVICE}.")
     return _t2i_pipeline
 
 
@@ -395,8 +428,7 @@ def _unload_t2i_pipeline():
     _t2i_pipeline = None
     gc.collect()
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+    _clear_device_cache()
     print("[T2I] VRAM freed.")
 
 
@@ -464,7 +496,7 @@ def _run_shape_from_image(
     _job_log(job_id, "[5/5] Saving mesh.glb...")
     size_kb = glb_path.stat().st_size // 1024
 
-    torch.cuda.empty_cache()
+    _clear_device_cache()
 
     return {"mesh_path": str(glb_path), "mesh_size_kb": size_kb}
 
@@ -581,52 +613,56 @@ def _run_shape_from_text(
 
     # Free shape model from VRAM before loading paint
     _unload_shape_pipeline()
-    torch.cuda.empty_cache()
+    _clear_device_cache()
 
     # ── Phase 2: Texturing ───────────────────────────────────────────
     _job_log(job_id, "═══ PHASE 3/3: TEXTURING ═══")
     _job_log(job_id, "[6/8] Loading paint pipeline...")
     paint = _get_paint_pipeline()
 
-    _job_log(job_id, "[7/8] Painting texture (~2-5 min)...")
-    textured = paint(paint_mesh, ref_image)
-
-    _job_log(job_id, "[8/8] Saving textured results...")
     files = ["text2img_reference.png"]
 
-    glb_out = output / "textured.glb"
-    textured.export(str(glb_out))
-    files.append("textured.glb")
+    if paint is None:
+        _job_log(job_id, "⚠ Paint pipeline unavailable — skipping texturing, returning mesh only")
+    else:
+        _job_log(job_id, "[7/8] Painting texture (~2-5 min)...")
+        textured = paint(paint_mesh, ref_image)
 
-    obj_out = output / "mesh_uv.obj"
-    textured.export(str(obj_out))
-    files.append("mesh_uv.obj")
+        _job_log(job_id, "[8/8] Saving textured results...")
 
-    tex_out = output / "texture_baked.png"
-    tex_saved = False
-    try:
-        mat = textured.visual.material
-        if hasattr(mat, "image") and mat.image is not None:
-            mat.image.save(str(tex_out))
-            tex_saved = True
-    except Exception:
-        pass
-    if not tex_saved:
+        glb_out = output / "textured.glb"
+        textured.export(str(glb_out))
+        files.append("textured.glb")
+
+        obj_out = output / "mesh_uv.obj"
+        textured.export(str(obj_out))
+        files.append("mesh_uv.obj")
+
+        tex_out = output / "texture_baked.png"
+        tex_saved = False
         try:
-            tv = textured.visual
-            if hasattr(tv, "to_texture"):
-                tv.to_texture().image.save(str(tex_out))
+            mat = textured.visual.material
+            if hasattr(mat, "image") and mat.image is not None:
+                mat.image.save(str(tex_out))
                 tex_saved = True
         except Exception:
             pass
-    if tex_saved:
-        files.append("texture_baked.png")
-    else:
-        _job_log(job_id, "⚠ texture_baked.png extraction failed — file not included")
+        if not tex_saved:
+            try:
+                tv = textured.visual
+                if hasattr(tv, "to_texture"):
+                    tv.to_texture().image.save(str(tex_out))
+                    tex_saved = True
+            except Exception:
+                pass
+        if tex_saved:
+            files.append("texture_baked.png")
+        else:
+            _job_log(job_id, "⚠ texture_baked.png extraction failed — file not included")
 
     files.append("mesh.glb")
 
-    torch.cuda.empty_cache()
+    _clear_device_cache()
     _job_log(job_id, f"═══ COMPLETE: {len(files)} files ready ═══")
 
     return {"files": files, "output_dir": str(output)}
@@ -886,6 +922,10 @@ def _run_texture(
     _job_log(job_id, "[1/4] Loading paint pipeline...")
     pipeline = _get_paint_pipeline()
 
+    if pipeline is None:
+        _job_log(job_id, "⚠ Paint pipeline unavailable — cannot texture mesh")
+        raise RuntimeError("Paint pipeline unavailable (MPS does not support custom_rasterizer)")
+
     _job_log(job_id, f"[2/4] Loading mesh: {mesh_path}")
     mesh = trimesh.load(mesh_path, force="mesh")
     if isinstance(mesh, trimesh.Scene):
@@ -928,7 +968,7 @@ def _run_texture(
     else:
         _job_log(job_id, "⚠ texture_baked.png extraction failed — file not included")
 
-    torch.cuda.empty_cache()
+    _clear_device_cache()
 
     return {"files": files, "output_dir": str(output)}
 
@@ -999,54 +1039,58 @@ def _run_full_pipeline(
 
     # Free shape model from VRAM before loading paint
     _unload_shape_pipeline()
-    torch.cuda.empty_cache()
+    _clear_device_cache()
 
     # ── Phase 2: Texturing ──────────────────────────────────────────
     _job_log(job_id, "═══ PHASE 2/2: TEXTURING ═══")
     _job_log(job_id, "[4/6] Loading paint pipeline...")
     paint = _get_paint_pipeline()
 
-    ref_image = Image.open(image_path)
-    _job_log(job_id, "[5/6] Painting texture (~2-5 min)...")
-    textured = paint(paint_mesh, ref_image)
-
-    _job_log(job_id, "[6/6] Saving textured results...")
     files = []
 
-    glb_out = output / "textured.glb"
-    textured.export(str(glb_out))
-    files.append("textured.glb")
+    if paint is None:
+        _job_log(job_id, "⚠ Paint pipeline unavailable — skipping texturing, returning mesh only")
+    else:
+        ref_image = Image.open(image_path)
+        _job_log(job_id, "[5/6] Painting texture (~2-5 min)...")
+        textured = paint(paint_mesh, ref_image)
 
-    obj_out = output / "mesh_uv.obj"
-    textured.export(str(obj_out))
-    files.append("mesh_uv.obj")
+        _job_log(job_id, "[6/6] Saving textured results...")
 
-    tex_out = output / "texture_baked.png"
-    tex_saved = False
-    try:
-        mat = textured.visual.material
-        if hasattr(mat, "image") and mat.image is not None:
-            mat.image.save(str(tex_out))
-            tex_saved = True
-    except Exception:
-        pass
-    if not tex_saved:
+        glb_out = output / "textured.glb"
+        textured.export(str(glb_out))
+        files.append("textured.glb")
+
+        obj_out = output / "mesh_uv.obj"
+        textured.export(str(obj_out))
+        files.append("mesh_uv.obj")
+
+        tex_out = output / "texture_baked.png"
+        tex_saved = False
         try:
-            tv = textured.visual
-            if hasattr(tv, "to_texture"):
-                tv.to_texture().image.save(str(tex_out))
+            mat = textured.visual.material
+            if hasattr(mat, "image") and mat.image is not None:
+                mat.image.save(str(tex_out))
                 tex_saved = True
         except Exception:
             pass
-    if tex_saved:
-        files.append("texture_baked.png")
-    else:
-        _job_log(job_id, "⚠ texture_baked.png extraction failed — file not included")
+        if not tex_saved:
+            try:
+                tv = textured.visual
+                if hasattr(tv, "to_texture"):
+                    tv.to_texture().image.save(str(tex_out))
+                    tex_saved = True
+            except Exception:
+                pass
+        if tex_saved:
+            files.append("texture_baked.png")
+        else:
+            _job_log(job_id, "⚠ texture_baked.png extraction failed — file not included")
 
     # Also keep the raw mesh
     files.append("mesh.glb")
 
-    torch.cuda.empty_cache()
+    _clear_device_cache()
     _job_log(job_id, f"═══ COMPLETE: {len(files)} files ready ═══")
 
     return {"files": files, "output_dir": str(output)}
@@ -1109,15 +1153,21 @@ app = FastAPI(
 @app.get("/api/health")
 async def health():
     """Health check — returns GPU info if available."""
-    info = {"status": "ok", "api_key_required": bool(API_KEY)}
+    info = {"status": "ok", "api_key_required": bool(API_KEY), "device": DEVICE}
     try:
         import torch
 
-        if torch.cuda.is_available():
+        if DEVICE == "cuda":
             info["gpu"] = torch.cuda.get_device_name(0)
             info["vram_gb"] = round(
                 torch.cuda.get_device_properties(0).total_memory / 1e9, 1
             )
+        elif DEVICE == "mps":
+            import psutil
+            info["gpu"] = "Apple Silicon MPS"
+            info["vram_gb"] = round(psutil.virtual_memory().total / 1e9, 1)
+        else:
+            info["gpu"] = "CPU only"
     except ImportError:
         info["gpu"] = "torch not available"
     info["models"] = _get_available_models()
