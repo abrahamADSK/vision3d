@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, Header, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Header, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
 # ── Device detection ─────────────────────────────────────────────────────────
@@ -259,14 +259,21 @@ async def _validate_upload(
 # ── Authentication ───────────────────────────────────────────────────────────
 
 
-def _verify_api_key(x_api_key: Optional[str], query_api_key: Optional[str] = None):
+def _verify_api_key(
+    x_api_key: Optional[str],
+    query_api_key: Optional[str] = None,
+    client_host: Optional[str] = None,
+):
     """Verify API key if one is configured.
 
     Checks header first, falls back to query param (needed for SSE/EventSource
     which cannot send custom headers). Phase 8.2 fix for Bug #4.
+    Requests from localhost (127.0.0.1, ::1) skip API key validation.
     """
     if not API_KEY:
         return  # No API key configured — open access (LAN only)
+    if client_host in ("127.0.0.1", "::1"):
+        return  # Localhost requests skip auth (local Web UI, curl, etc.)
     # Use header key if present, otherwise fall back to query param
     key = x_api_key or query_api_key
     if not key or not secrets.compare_digest(key, API_KEY):
@@ -1190,9 +1197,10 @@ async def generate_shape(
     octree_resolution: int = Form(0),
     num_inference_steps: int = Form(0),
     x_api_key: Optional[str] = Header(None),
+    request: Request = None,
 ):
     """Upload an image, get a 3D mesh back (async job)."""
-    _verify_api_key(x_api_key)
+    _verify_api_key(x_api_key, client_host=request.client.host if request and request.client else None)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
     output_subdir = _resolve_output_subdir(output_subdir)   # Unique dir if default (Bug #6)
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
@@ -1231,9 +1239,10 @@ async def generate_text(
     octree_resolution: int = Form(0),
     num_inference_steps: int = Form(0),
     x_api_key: Optional[str] = Header(None),
+    request: Request = None,
 ):
     """Generate 3D mesh from text prompt (async job)."""
-    _verify_api_key(x_api_key)
+    _verify_api_key(x_api_key, client_host=request.client.host if request and request.client else None)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
     output_subdir = _resolve_output_subdir(output_subdir)   # Unique dir if default (Bug #6)
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
@@ -1260,9 +1269,10 @@ async def texture_mesh(
     image: UploadFile = File(...),
     output_subdir: str = Form("0"),
     x_api_key: Optional[str] = Header(None),
+    request: Request = None,
 ):
     """Upload mesh + image, get textured mesh back (async job)."""
-    _verify_api_key(x_api_key)
+    _verify_api_key(x_api_key, client_host=request.client.host if request and request.client else None)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
     output_subdir = _resolve_output_subdir(output_subdir)   # Unique dir if default (Bug #6)
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
@@ -1292,9 +1302,9 @@ async def texture_mesh(
 
 
 @app.get("/api/jobs/{job_id}")
-async def get_job(job_id: str, x_api_key: Optional[str] = Header(None)):
+async def get_job(job_id: str, x_api_key: Optional[str] = Header(None), request: Request = None):
     """Poll job status. When completed, includes download links."""
-    _verify_api_key(x_api_key)
+    _verify_api_key(x_api_key, client_host=request.client.host if request and request.client else None)
 
     job = _jobs.get(job_id)
     if not job:
@@ -1321,10 +1331,10 @@ async def get_job(job_id: str, x_api_key: Optional[str] = Header(None)):
 
 @app.get("/api/jobs/{job_id}/files/{filename}")
 async def download_file(
-    job_id: str, filename: str, x_api_key: Optional[str] = Header(None)
+    job_id: str, filename: str, x_api_key: Optional[str] = Header(None), request: Request = None
 ):
     """Download a result file from a completed job."""
-    _verify_api_key(x_api_key)
+    _verify_api_key(x_api_key, client_host=request.client.host if request and request.client else None)
 
     job = _jobs.get(job_id)
     if not job:
@@ -1354,9 +1364,11 @@ async def get_presets():
 async def get_models():
     """Return available shape models (those with weights on disk)."""
     available = _get_available_models()
+    default = "full" if DEVICE == "mps" else "turbo"
     return {
         "models": available,
-        "default": "turbo" if "turbo" in available else (available[0] if available else "turbo"),
+        "default": default if default in available else (available[0] if available else default),
+        "device": DEVICE,
         "all": {name: subfolder for name, subfolder in SHAPE_MODELS.items()},
     }
 
@@ -1371,13 +1383,14 @@ async def generate_full(
     octree_resolution: int = Form(0),
     num_inference_steps: int = Form(0),
     x_api_key: Optional[str] = Header(None),
+    request: Request = None,
 ):
     """Full pipeline: image → shape generation → adaptive decimation → texturing.
 
     Returns a job that produces textured.glb, mesh_uv.obj, texture_baked.png, and mesh.glb.
     Use /api/jobs/{job_id}/stream for real-time Server-Sent Events progress.
     """
-    _verify_api_key(x_api_key)
+    _verify_api_key(x_api_key, client_host=request.client.host if request and request.client else None)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
     output_subdir = _resolve_output_subdir(output_subdir)   # Unique dir if default (Bug #6)
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
@@ -1420,6 +1433,7 @@ async def stream_job(
     job_id: str,
     x_api_key: Optional[str] = Header(None),
     x_api_key_query: Optional[str] = Query(None, alias="x_api_key"),
+    request: Request = None,
 ):
     """Stream job progress as Server-Sent Events (SSE).
 
@@ -1428,7 +1442,7 @@ async def stream_job(
     Accepts API key via header or query param (EventSource cannot send custom headers).
     """
     # SSE auth: header first, query param fallback (Bug #4 fix — Phase 8.2)
-    _verify_api_key(x_api_key, query_api_key=x_api_key_query)
+    _verify_api_key(x_api_key, query_api_key=x_api_key_query, client_host=request.client.host if request and request.client else None)
 
     job = _jobs.get(job_id)
     if not job:
@@ -1678,9 +1692,10 @@ async function loadModels() {
         if (m === data.default) opt.selected = true;
         sel.appendChild(opt);
       });
-      // If no models found, show a fallback
+      // If no models found, fallback based on device
       if (models.length === 0) {
-        sel.innerHTML = '<option value="turbo">turbo</option>';
+        const fallback = data.device === 'mps' ? 'full' : 'turbo';
+        sel.innerHTML = '<option value="' + fallback + '">' + fallback + '</option>';
       }
     });
   } catch (e) {
@@ -1705,7 +1720,10 @@ function onPresetChange(tabId) {
   const preset = PRESETS[presetSel.value];
   if (!preset) return;
 
-  document.getElementById('model' + suffix).value = preset.model;
+  const modelSel = document.getElementById('model' + suffix);
+  if ([...modelSel.options].some(o => o.value === preset.model)) {
+    modelSel.value = preset.model;
+  }
   document.getElementById('octree_resolution' + suffix).value = preset.octree_resolution;
   document.getElementById('num_inference_steps' + suffix).value = preset.num_inference_steps;
   document.getElementById('target_faces' + suffix).value = preset.target_faces;
