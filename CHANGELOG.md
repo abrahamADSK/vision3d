@@ -9,6 +9,30 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ---
 
+## [v1.5.1] — 2026-04-09
+
+### Changed
+- **No hardcoded infrastructure in the repo.** The interactive prompt's
+  default remote host now reads from the env var
+  `VISION3D_DEFAULT_REMOTE_HOST` (a personal setting in the operator's
+  shell). If unset, the prompt has no default and the hostname is
+  required. Removes the previously hardcoded default that leaked a
+  specific machine name into the public repo.
+- All documentation (`README.md`, `CLAUDE.md`, `HANDOFF.md`,
+  `CHANGELOG.md`, `install.sh` user-facing strings) genericized to
+  `<gpu-host>` placeholders. No machine name, IP address, or concrete
+  API key value appears anywhere in the repo.
+- SSE docstring placeholder `?x_api_key=KEY` → `?x_api_key=<value>`
+  for consistency.
+
+### Added
+- New env var `VISION3D_DEFAULT_REMOTE_HOST` documented in `README.md`
+  and `CLAUDE.md`.
+
+**Commit**: `c174569`.
+
+---
+
 ## [v1.5.0] — 2026-04-09
 
 ### Added
@@ -140,6 +164,7 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ---
 
+[v1.5.1]: https://github.com/abrahamADSK/vision3d/releases/tag/v1.5.1
 [v1.5.0]: https://github.com/abrahamADSK/vision3d/releases/tag/v1.5.0
 [v1.4.0]: https://github.com/abrahamADSK/vision3d/releases/tag/v1.4.0
 [v1.3.0]: https://github.com/abrahamADSK/vision3d/releases/tag/v1.3.0
