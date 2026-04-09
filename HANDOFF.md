@@ -1,23 +1,28 @@
 # HANDOFF — vision3d
 
-**Last updated**: 2026-04-05 — Phase 8.3: final fixes + automated tests
-**Completitud**: ~99% (server funcional, 7/7 bugs corregidos, 20 tests)
+**Last updated**: 2026-04-09 — v1.5.0 (interactive backend selection, local MPS / remote CUDA proxy)
+**Completitud**: ~99% (server funcional, dual-mode local/remote, 7/7 bugs históricos corregidos, 21 tests)
 
 ---
 
 ## 1. Mapa del componente
 
-**Vision3D** es un servidor FastAPI de inferencia GPU para generación 3D.
+**Vision3D** es un servidor FastAPI de inferencia 3D que **desde v1.5.0 puede correr en dos modos**:
+
+- **LOCAL** — inferencia en la propia máquina (Apple Silicon MPS, NVIDIA CUDA, o CPU). Comportamiento original. Se usa en el GPU host dedicado (RTX 3090) y en Macs M4/M5 Pro como nodo standalone.
+- **REMOTE** — el servidor local actúa como **fachada HTTP**: cada llamada `/api/*` se proxya vía `httpx` async a otra instancia de vision3d. Cero estado local de jobs, cero carga local de GPU. Los SSE pasan byte-a-byte. Permite que un Mac de desarrollo ejecute la web UI mientras el trabajo CUDA se delega a un box Linux con GPU.
+
+El modo se elige al arrancar (`Run locally? [y/N]:` → `Remote host [<default>]:`) y se persiste vía env var `VISION3D_REMOTE_HOST` para que workers de uvicorn y `--reload` lo hereden. CLI flags `--local` y `--remote HOST` saltan el prompt. El default del prompt viene de `VISION3D_DEFAULT_REMOTE_HOST` (env var personal del usuario, nunca commiteada) — **ningún hostname está hardcodeado en el repo**.
 
 | Aspecto | Detalle |
 |---|---|
 | **Tipo** | REST API server (FastAPI + uvicorn) |
-| **Lenguaje** | Python 3 (single file: `server.py`, 1646 lines) |
-| **Dónde corre** | `glorfindel` (Rocky Linux, NVIDIA RTX 3090 24 GB) |
+| **Lenguaje** | Python 3 (single file: `server.py`, ~2450 lines) |
+| **Dónde corre** | GPU host dedicado (Rocky Linux, NVIDIA RTX 3090 24 GB) y/o Apple Silicon (M4/M5 Pro) en modo local; cualquier Mac como fachada en modo remoto |
 | **Puerto** | 8000 (configurable via `--port`) |
 | **Dependencias ML** | Hunyuan3D-2 (Tencent), SDXL Turbo (Stability AI), pyfqmr, trimesh, rembg |
-| **Dependencias Python** | FastAPI, uvicorn, torch, diffusers, transformers, accelerate, Pillow, numpy |
-| **Requiere** | NVIDIA GPU con 16+ GB VRAM, CUDA, `custom_rasterizer` compilado |
+| **Dependencias Python** | FastAPI, uvicorn, torch, diffusers, transformers, accelerate, Pillow, numpy, httpx |
+| **Requiere** | GPU CUDA con 16+ GB VRAM **o** Apple Silicon con 16+ GB unified RAM. En modo remoto, solo se necesita Python + httpx en el cliente. |
 
 ### Relación con el ecosistema
 
@@ -30,7 +35,15 @@ maya-mcp (FastMCP, Mac)
     │
     │ HTTP REST (httpx → port 8000)
     ↓
-vision3d (FastAPI, glorfindel GPU)
+vision3d (FastAPI)                  ← modo LOCAL (MPS o CUDA)
+    │
+    │   o bien:
+    │
+vision3d façade (Mac, port 8000)    ← modo REMOTE — proxy puro
+    │
+    │ HTTP REST (httpx async, incluye SSE pass-through)
+    ↓
+vision3d backend (<gpu-host>:8000)  ← inferencia real
     │
     │ Hunyuan3D-2 / SDXL Turbo / pyfqmr
     ↓
@@ -202,6 +215,47 @@ Estos problemas se encontraron en el código y están **documentados en CLAUDE.m
 ---
 
 ## Changelog
+
+> Para el changelog completo y mantenido entre releases, ver [`CHANGELOG.md`](CHANGELOG.md).
+> Esta sección retiene el historial detallado por fase de la auditoría 8.x.
+
+### v1.5.0 (2026-04-09) — Interactive backend selection
+- **Selección de backend al arranque**: prompt interactivo `Run locally? [y/N]:` → `Remote host [<default>]:` con validación `GET /api/health` (timeout 5 s) en loop hasta encontrar host saludable. El default del prompt viene de `VISION3D_DEFAULT_REMOTE_HOST` (env var personal); si no está set, no hay default y el hostname es obligatorio.
+- **Modo proxy remoto**: los 4 endpoints POST de generación, los GET de polling/files, `/api/models`, `/api/presets` y el SSE stream se proxyan vía `httpx` async cuando `VISION3D_REMOTE_HOST` está set. SSE pasa byte-a-byte. Cero estado local de jobs, cero carga local de GPU.
+- **CLI flags** `--local` y `--remote HOST` para saltar el prompt; `--reload` fuerza local (incompatible con `input()`).
+- **Env vars** nuevas: `VISION3D_DEFAULT_REMOTE_HOST` (default del prompt), `VISION3D_REMOTE_HOST`, `VISION3D_REMOTE_PORT` (default 8000), `VISION3D_REMOTE_KEY` (opcional, default = pass-through del `x-api-key` entrante).
+- **Sin hardcoding**: ningún hostname ni clave concreta en el código ni en los docs del repo.
+- `/api/health` ahora reporta `mode` (`local`/`remote`) y `remote_host`/`remote_port` cuando aplica.
+- README.md, CLAUDE.md y docstring de cabecera de `server.py` actualizados.
+- Tests sin cambios (21/21 pasan — el código nuevo está guardado por env var).
+- Commits: `f77b8e7` (feat), `c5e80e6` (docs).
+
+### v1.4.0 (2026-04-09) — Real SSE progress events + job TTL
+- Nuevo evento SSE `progress` con JSON `{stage, progress, message}` alimentado por `_job_progress()`, `_make_diffusion_callback()` y `_paint_progress_scope()`.
+- Poll del SSE bajado de 2 s → 0.5 s.
+- `_delete_job_output()` borra los artefactos en disco de jobs expirados además del registro en memoria.
+- Commit: `a055fce`.
+
+### v1.3.0 (2026-04-09) — Apple Silicon (MPS) texturing
+- Paint pipeline funciona en MPS vía `from_pretrained` condicional y mejor logging (integración con fork `hunyuan3d-mac`).
+- `setup.sh` cross-platform: LaunchAgent en macOS, systemd en Linux, con `--uninstall`.
+- Web UI: bypass de auth en localhost, default `full`, fix del dropdown de presets.
+- Docs Apple Silicon: stack verificado (PyTorch 2.6.0 pinned), warning de regresión MPS en `torch >= 2.7`, caveats fp16-on-MPS para multiview UNet y SD x4 upscaler, benchmark M4 Pro (626 s, 23.8 GB peak).
+- Commit: `ee2e949`.
+
+### v1.2.0 (2026-04-08) — Docs Apple Silicon
+- Sección de setup MPS añadida al `README.md`.
+- Quick Start reescrita usando `install.sh` (auto-detecta CUDA/MPS/CPU).
+- Commit: `63721cc`.
+
+### v1.1.0 (2026-04-08) — MPS support
+- Auto-detect device (CUDA → MPS → CPU). En MPS usa `hunyuan3d-dit-v2-0` con `variant='fp16'` y `use_safetensors=True` (turbo no disponible en Mac por scheduler ausente).
+- Commit: `4addd40`.
+
+### v1.0.0 (2026-04-07) — First tagged release
+- 11 REST endpoints + Web UI embebida.
+- Phase 8 security/stability: GPU semaphore + 429, sanitización path-traversal, SSE auth fallback, job cleanup, upload validation, output_subdir UUID8, 20 tests.
+- Commit: `567796b`.
 
 ### Phase 8.3 (2026-04-05) — Fixes finales + tests
 - **Fix 7 (Bug #6)**: output_subdir collision — `_resolve_output_subdir()` reemplaza default "0" con UUID8.

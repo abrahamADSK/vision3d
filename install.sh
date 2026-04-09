@@ -20,7 +20,7 @@
 # What this script does NOT do (see setup.sh instead):
 #   - systemd service creation
 #   - API key generation
-#   - Deployment to glorfindel
+#   - Deployment to a remote GPU host
 #
 # Usage:
 #   chmod +x install.sh
@@ -412,7 +412,7 @@ if [[ ${#STEPS_ERR[@]} -eq 0 ]]; then
     echo -e "  2. Run the server locally:"
     echo -e "     ${CYAN}.venv/bin/python server.py --port 8000${RESET}"
     echo ""
-    echo -e "  ${BOLD}For GPU deployment (glorfindel):${RESET}"
+    echo -e "  ${BOLD}For GPU host deployment:${RESET}"
     echo -e "     ${CYAN}bash setup.sh${RESET}  — systemd service, API key, auto-start"
     echo ""
 else

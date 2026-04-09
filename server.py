@@ -15,7 +15,9 @@ Backend modes (introduced in v1.5.0):
 
 At startup the entry point asks interactively:
     Run locally? [y/N]:
-    Remote host [glorfindel]:
+    Remote host [<default-from-env>]:
+The default for the remote prompt comes from the env var
+VISION3D_DEFAULT_REMOTE_HOST (unset → no default; user must type a host).
 The selected mode applies to the whole session and is persisted via env
 var so uvicorn workers / --reload pick it up.
 
@@ -31,19 +33,22 @@ Endpoints:
     GET  /api/models, /api/presets            — metadata
 
 Usage:
-    .venv/bin/python server.py --port 8000             # interactive prompt
-    .venv/bin/python server.py --local                 # force local, no prompt
-    .venv/bin/python server.py --remote glorfindel     # force remote, no prompt
-    .venv/bin/python server.py --host 0.0.0.0 --port 8000  # LAN access
+    .venv/bin/python server.py --port 8000                  # interactive prompt
+    .venv/bin/python server.py --local                      # force local, no prompt
+    .venv/bin/python server.py --remote <gpu-host>          # force remote, no prompt
+    .venv/bin/python server.py --host 0.0.0.0 --port 8000   # LAN access
 
 Environment:
-    GPU_API_KEY            — API key for authentication (empty = open access)
-    GPU_MODELS_DIR         — Model weights (default: ./hf_models)
-    GPU_WORK_DIR           — Working directory for outputs (default: ./output)
-    GPU_VISION_DIR         — Vision3D installation directory (default: .)
-    VISION3D_REMOTE_HOST   — If set, proxy mode is active (set by prompt or --remote)
-    VISION3D_REMOTE_PORT   — Remote port (default: 8000)
-    VISION3D_REMOTE_KEY    — API key forwarded to remote (default: pass through client key)
+    GPU_API_KEY                    — API key for authentication (empty = open access)
+    GPU_MODELS_DIR                 — Model weights (default: ./hf_models)
+    GPU_WORK_DIR                   — Working directory for outputs (default: ./output)
+    GPU_VISION_DIR                 — Vision3D installation directory (default: .)
+    VISION3D_DEFAULT_REMOTE_HOST   — Default offered by the interactive prompt
+                                      (unset → no default; user must type one)
+    VISION3D_REMOTE_HOST           — If set, proxy mode is active (set by prompt or --remote)
+    VISION3D_REMOTE_PORT           — Remote port (default: 8000)
+    VISION3D_REMOTE_KEY            — API key forwarded to remote
+                                      (default: pass through inbound client key)
 """
 
 import asyncio
@@ -1913,7 +1918,7 @@ async def stream_job(
 ):
     """Stream job progress as Server-Sent Events (SSE).
 
-    Connect with: const es = new EventSource('/api/jobs/{job_id}/stream?x_api_key=KEY')
+    Connect with: const es = new EventSource('/api/jobs/{job_id}/stream?x_api_key=<value>')
     Events: 'log' (progress lines), 'status' (running/completed/failed), 'done' (final).
     Accepts API key via header or query param (EventSource cannot send custom headers).
     """
@@ -2413,10 +2418,15 @@ def _prompt_backend_selection() -> Optional[str]:
 
     Loops until a remote answers /api/health within 5s, or the user picks local.
     Health endpoint is /api/health (the actual server path), not /health.
+
+    The default remote host is read from the env var
+    VISION3D_DEFAULT_REMOTE_HOST so that no hostname is hardcoded in the
+    repo. If it is unset, the prompt has no default and the user must
+    type a hostname explicitly.
     """
     import httpx
 
-    default_host = "glorfindel"
+    default_host = os.environ.get("VISION3D_DEFAULT_REMOTE_HOST", "").strip() or None
     while True:
         try:
             answer = input("Run locally? [y/N]: ").strip().lower()
@@ -2429,12 +2439,17 @@ def _prompt_backend_selection() -> Optional[str]:
             return None
 
         # Anything else (including empty) → remote selection
+        prompt = f"Remote host [{default_host}]: " if default_host else "Remote host: "
         try:
-            host_in = input(f"Remote host [{default_host}]: ").strip()
+            host_in = input(prompt).strip()
         except EOFError:
             print("[Vision3D] No interactive TTY; defaulting to local mode")
             return None
         host = host_in or default_host
+        if not host:
+            print("❌ No host provided and no default set "
+                  "(VISION3D_DEFAULT_REMOTE_HOST is empty). Try again.\n")
+            continue
 
         url = f"http://{host}:{REMOTE_PORT}/api/health"
         try:

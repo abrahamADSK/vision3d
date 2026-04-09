@@ -74,12 +74,13 @@ At startup, `server.py` asks where to run inference:
 
 ```
 Run locally? [y/N]: n
-Remote host [glorfindel]:
-→ Connected to http://glorfindel:8000
+Remote host: <gpu-host>
+→ Connected to http://<gpu-host>:8000
 ```
 
 - Answer `y` → run inference **locally** (Apple Silicon MPS or local CUDA).
-- Answer `n` (or just press Enter) → enter a **remote host**. The default is `glorfindel`. The local server validates `GET http://{host}:8000/api/health` with a 5 s timeout and loops until a remote answers.
+- Answer `n` (or just press Enter) → enter a **remote host**. The local server validates `GET http://{host}:8000/api/health` with a 5 s timeout and loops until a remote answers.
+- The prompt offers a default only if the env var `VISION3D_DEFAULT_REMOTE_HOST` is set in your shell (e.g. in `~/.zshrc`). If unset, the prompt has no default and the hostname is required. **No machine name is hardcoded in the repo.**
 
 In remote mode the local process becomes a thin **HTTP façade**: every `/api/*` call (generation, polling, file downloads, SSE progress stream) is proxied to the remote vision3d instance. There is **zero local job state** — job IDs are owned by the remote. The local web UI is unaware of the difference. This is useful when you want to develop and test from a Mac while delegating the heavy CUDA work to a Linux GPU box.
 
@@ -87,7 +88,7 @@ In remote mode the local process becomes a thin **HTTP façade**: every `/api/*`
 
 ```bash
 .venv/bin/python server.py --local                    # force local
-.venv/bin/python server.py --remote glorfindel        # force remote
+.venv/bin/python server.py --remote <gpu-host>        # force remote
 .venv/bin/python server.py --reload                   # forces local (prompt incompatible with reload)
 ```
 
@@ -95,6 +96,7 @@ In remote mode the local process becomes a thin **HTTP façade**: every `/api/*`
 
 | Variable | Default | Description |
 |---|---|---|
+| `VISION3D_DEFAULT_REMOTE_HOST` | unset | Hostname offered as the default in the interactive prompt. Personal config — set in your shell, never committed. |
 | `VISION3D_REMOTE_HOST` | unset | If set, the server starts in remote mode without prompting. Set automatically by `--remote` and by the interactive prompt (so uvicorn workers and `--reload` inherit it). |
 | `VISION3D_REMOTE_PORT` | `8000` | Port on the remote host. |
 | `VISION3D_REMOTE_KEY` | unset | API key forwarded to the remote on every proxied request. If unset, the inbound `x-api-key` from the local client is forwarded as-is. |
@@ -239,7 +241,7 @@ Browser / MCP client / curl
 vision3d/
 ├── server.py          # FastAPI server — all endpoints, pipelines, and web UI
 ├── install.sh         # Automated installer (CUDA/MPS/CPU detection, venv, deps)
-├── setup.sh           # GPU deployment script (systemd service, API key, glorfindel)
+├── setup.sh           # GPU deployment script (systemd service, API key)
 ├── requirements.txt   # Python dependencies
 └── .env.example       # Environment variables template
 ```

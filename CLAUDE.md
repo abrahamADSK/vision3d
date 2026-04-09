@@ -9,10 +9,10 @@
 
 **Vision3D** is a FastAPI server for 3D model generation using **Hunyuan3D-2** (Tencent) and **SDXL Turbo** (Stability AI). Since v1.5.0 it can run in **two modes**:
 
-- **LOCAL** — inference runs on this machine (Apple Silicon MPS, NVIDIA CUDA, or CPU). Original behaviour. Used by the GPU box `glorfindel` (Rocky Linux + RTX 3090) and by Mac developers with M-series chips.
-- **REMOTE** — the local server acts as a thin **HTTP façade**: every `/api/*` call is proxied via `httpx` async to another vision3d instance (typically `glorfindel`). Zero local job state, zero GPU load. SSE streams pass through byte-for-byte. This lets a Mac front-end delegate heavy CUDA work to the GPU box while presenting the same web UI locally.
+- **LOCAL** — inference runs on this machine (Apple Silicon MPS, NVIDIA CUDA, or CPU). Original behaviour. Used by the dedicated GPU box (Rocky Linux + RTX 3090) and by Mac developers with M-series chips.
+- **REMOTE** — the local server acts as a thin **HTTP façade**: every `/api/*` call is proxied via `httpx` async to another vision3d instance. Zero local job state, zero GPU load. SSE streams pass through byte-for-byte. This lets a Mac front-end delegate heavy CUDA work to a Linux GPU box while presenting the same web UI locally.
 
-The mode is chosen at startup by an interactive prompt (`Run locally? [y/N]:` → `Remote host [glorfindel]:`) and persisted via env var `VISION3D_REMOTE_HOST` so uvicorn workers and `--reload` pick it up. CLI flags `--local` and `--remote HOST` skip the prompt.
+The mode is chosen at startup by an interactive prompt (`Run locally? [y/N]:` → `Remote host [<default>]:`) and persisted via env var `VISION3D_REMOTE_HOST` so uvicorn workers and `--reload` pick it up. CLI flags `--local` and `--remote HOST` skip the prompt. The prompt's default value is read from `VISION3D_DEFAULT_REMOTE_HOST` (a personal env var, never committed) — no hostname is hardcoded in the repo.
 
 Eleven REST endpoints + embedded Web UI:
 - **image-to-3D** (`POST /api/generate-shape`): Image → 3D mesh (`.glb`)
@@ -32,11 +32,11 @@ Eleven REST endpoints + embedded Web UI:
 ## 2. Execution Environment
 
 ### GPU Machine
-- **Server**: `glorfindel` (GPU with CUDA, Rocky Linux)
+- **Server**: dedicated GPU host (CUDA, Rocky Linux). Hostname is operator-configured, never hardcoded in this repo.
 - **User**: root (via systemd)
 - **Working directory**: `/home/flame/ai-studio/vision3d/`
 
-### Directory structure on glorfindel
+### Directory structure on the GPU host
 ```
 ~/ai-studio/vision3d/
 ├── .venv/                          # Virtual environment
@@ -73,7 +73,7 @@ Eleven REST endpoints + embedded Web UI:
 .venv/bin/python server.py --port 9000                    # custom port
 .venv/bin/python server.py --reload                       # auto-reload (forces local; prompt incompatible)
 .venv/bin/python server.py --local                        # skip prompt, force local backend
-.venv/bin/python server.py --remote glorfindel            # skip prompt, proxy to glorfindel
+.venv/bin/python server.py --remote <gpu-host>            # skip prompt, proxy to a remote
 ```
 - `--host`: bind address (default: `0.0.0.0`)
 - `--port`: port (default: `8000`)
@@ -395,14 +395,14 @@ output/
 
 ## 8. Operational Notes
 
-- Server runs as **root** via systemd.
+- Server runs as **root** via systemd on the GPU host.
 - Source code edited from local Mac, pushed via git.
-- After `git pull` on glorfindel: `sudo systemctl daemon-reload && sudo systemctl restart vision3d`
+- After `git pull` on the GPU host: `sudo systemctl daemon-reload && sudo systemctl restart vision3d`
 - Web UI embedded in `server.py` (inline HTML, ~380 lines at `_WEB_UI_HTML`).
 - Web UI has 2 tabs: "Image → 3D" and "Text → 3D".
-- Web UI supports API key via URL query param: `http://glorfindel:8000/?key=YOUR_KEY`.
+- Web UI supports the API key via URL query param `?key=<value>` (the key value comes from the `GPU_API_KEY` env var on the server).
 - GLB results displayed in interactive 3D viewer (`<model-viewer>` v3.5.0, orbit controls).
-- Use `.venv/bin/python -m pip` on glorfindel (pip's shebang may be broken).
+- Use `.venv/bin/python -m pip` on the GPU host (pip's shebang may be broken).
 
 ### Background removal
 Automatic background removal is triggered when the input image has **less than 5% transparent pixels** (alpha channel < 10). Uses `hy3dgen.rembg.BackgroundRemover`. If rembg is not installed, the step is silently skipped.
@@ -412,7 +412,7 @@ Automatic background removal is triggered when the input image has **less than 5
 ## 9. Integration with Other Projects
 
 ```
-vision3d (FastAPI on glorfindel)
+vision3d (FastAPI on the GPU host)
     ↑
     │ HTTP REST (port 8000)
     ↓
@@ -424,7 +424,7 @@ Claude Code / Claude Desktop (local Mac)
 ```
 
 **Locations**:
-- `vision3d`: `/home/flame/ai-studio/vision3d/` (glorfindel)
+- `vision3d`: `/home/<user>/ai-studio/vision3d/` (GPU host)
 - `maya-mcp`: `~/Claude_projects/maya-mcp/` (Mac)
 - `fpt-mcp`: `~/Claude_projects/fpt-mcp/` (Mac)
 
@@ -432,13 +432,13 @@ Claude Code / Claude Desktop (local Mac)
 
 ## 10. Development and Deployment
 
-### After git pull on glorfindel
+### After git pull on the GPU host
 ```bash
-ssh glorfindel
+ssh <gpu-host>
 cd ~/ai-studio/vision3d && git pull && sudo systemctl restart vision3d && sudo journalctl -u vision3d -f -n 20
 ```
 
-### Local development (on glorfindel)
+### Local development (on the GPU host)
 ```bash
 cd ~/ai-studio/vision3d/
 .venv/bin/python server.py --port 8000
