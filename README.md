@@ -30,7 +30,7 @@ Built on [Hunyuan3D-2](https://github.com/Tencent/Hunyuan3D-2) (Tencent) for sha
 - Python 3.10+
 - **Hunyuan3D-2**:
   - CUDA: [Tencent/Hunyuan3D-2](https://github.com/Tencent/Hunyuan3D-2) (original fork) + turbo model
-  - MPS: [Maxim-Lanskoy/Hunyuan3D-2-Mac](https://github.com/Maxim-Lanskoy/Hunyuan3D-2-Mac) (Mac fork) + base model v2-0 (turbo requires a scheduler not available in the Mac fork)
+  - MPS: [abrahamADSK/Hunyuan3D-2-Mac](https://github.com/abrahamADSK/Hunyuan3D-2-Mac) (Mac fork with MPS texturing fixes) + base model v2-0 (turbo requires a scheduler not available in the Mac fork)
 - [SDXL Turbo](https://huggingface.co/stabilityai/sdxl-turbo) (~6 GB, auto-downloaded on first text-to-3D use)
 - `diffusers`, `transformers`, `accelerate` (for SDXL Turbo text-to-image)
 - `rembg` + `onnxruntime` (background removal for text-to-3D)
@@ -70,7 +70,7 @@ Open `http://YOUR_GPU_HOST:8000` in a browser.
 
 ### Apple Silicon (MPS) notes
 
-- The Mac fork is [Maxim-Lanskoy/Hunyuan3D-2-Mac](https://github.com/Maxim-Lanskoy/Hunyuan3D-2-Mac). Clone it **outside** the vision3d repo — `install.sh` searches for it in `../hunyuan3d-mac`, `~/Projects/hunyuan3d-mac`, and `~/Claude_projects/hunyuan3d-mac`.
+- The Mac fork is [abrahamADSK/Hunyuan3D-2-Mac](https://github.com/abrahamADSK/Hunyuan3D-2-Mac) (a fork of Maxim-Lanskoy/Hunyuan3D-2-Mac with the MPS texturing fixes). Clone it **outside** the vision3d repo — `install.sh` searches for it in `../hunyuan3d-mac`, `~/Projects/hunyuan3d-mac`, and `~/Claude_projects/hunyuan3d-mac`.
 - Uses the base model `hunyuan3d-dit-v2-0` (not turbo) with `variant='fp16'`, `use_safetensors=True`.
 - Weights are downloaded automatically from HuggingFace on first run (~18.8 GB for `hunyuan3d-dit-v2-0`).
 - `custom_rasterizer` is **not** needed on MPS — texturing is not yet supported on Mac (shape generation only).
