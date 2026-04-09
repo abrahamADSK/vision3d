@@ -123,14 +123,34 @@ def mock_job_old_failed():
 
 @pytest.fixture
 def mock_job_running():
-    """Insert a running job (should NOT be cleaned up)."""
+    """Insert a running job old enough to trigger completed-TTL but still
+    exempt from the running-TTL (so cleanup must NOT touch it)."""
     job_id = "run12345"
     server._jobs[job_id] = {
         "id": job_id,
         "type": "full-pipeline",
         "status": "running",
         "detail": "running test",
-        "created": time.time() - 7200,  # 2 hours ago but still running
+        # > JOB_TTL_SECONDS (3600) but < JOB_RUNNING_TTL (7200)
+        "created": time.time() - 4000,
+        "output_dir": None,
+        "files": [],
+        "error": None,
+        "log": [],
+    }
+    return job_id
+
+
+@pytest.fixture
+def mock_job_zombie_running():
+    """Insert a running job older than JOB_RUNNING_TTL — must be cleaned."""
+    job_id = "zom12345"
+    server._jobs[job_id] = {
+        "id": job_id,
+        "type": "full-pipeline",
+        "status": "running",
+        "detail": "zombie",
+        "created": time.time() - 10000,  # > JOB_RUNNING_TTL (7200)
         "output_dir": None,
         "files": [],
         "error": None,

@@ -103,6 +103,12 @@ def _new_job(job_type: str, detail: str = "") -> str:
         "files": [],
         "error": None,
         "log": [],
+        # Progress reporting (consumed by SSE 'progress' event):
+        #   stage:   "t2i" | "shape" | "paint"
+        #   percent: 0.0 - 100.0 (overall progress within the stage)
+        #   message: human-readable detail (e.g., "step 12/30", "multiview diffusion")
+        #   updated: monotonic counter incremented on every change so SSE can detect deltas
+        "progress": {"stage": "", "percent": 0.0, "message": "", "updated": 0},
     }
     return job_id
 
@@ -110,6 +116,41 @@ def _new_job(job_type: str, detail: str = "") -> str:
 def _job_log(job_id: str, msg: str):
     if job_id in _jobs:
         _jobs[job_id]["log"].append(msg)
+
+
+def _make_diffusion_callback(job_id: str, stage: str, total_steps: int):
+    """Build a diffusers-legacy callback that reports progress to a job.
+
+    Returns a function with signature (step, timestep, latents) suitable for
+    passing as `callback=` (with `callback_steps=1`) to any diffusers pipeline
+    that uses the legacy callback API (Hunyuan3D shapegen, SDXL Turbo, etc.).
+
+    `step` is 0-indexed; we report (step + 1) / total_steps as percent so the
+    bar reaches 100% on the final step instead of (total-1)/total.
+    """
+    total = max(1, int(total_steps))
+
+    def _cb(step, timestep, latents):  # signature mandated by diffusers
+        percent = (step + 1) / total * 100.0
+        _job_progress(job_id, stage, percent, f"step {step + 1}/{total}")
+
+    return _cb
+
+
+def _job_progress(job_id: str, stage: str, percent: float, message: str = ""):
+    """Update the progress slot of a job. Safe to call from worker threads.
+
+    Bounds percent to [0, 100]. Bumps the 'updated' counter so the SSE
+    generator can detect a change without comparing all fields.
+    """
+    job = _jobs.get(job_id)
+    if job is None:
+        return
+    p = job["progress"]
+    p["stage"] = stage
+    p["percent"] = max(0.0, min(100.0, float(percent)))
+    p["message"] = message
+    p["updated"] += 1
 
 
 def _job_done(job_id: str, output_dir: str, files: list[str]):
@@ -125,36 +166,87 @@ def _job_fail(job_id: str, error: str):
         _jobs[job_id]["error"] = error
 
 
-# ── Job cleanup (TTL-based eviction) — Phase 8.2 fix for Bug #2 ────────────
+# ── Job cleanup (TTL-based eviction) ────────────────────────────────────────
+#
+# Configurable via environment variables:
+#   GPU_JOB_TTL              — Seconds before completed/failed jobs are evicted (default 3600 = 1h)
+#   GPU_JOB_RUNNING_TTL      — Seconds before stuck "running" jobs are force-failed and evicted (default 7200 = 2h)
+#   GPU_JOB_CLEANUP_INTERVAL — Seconds between cleanup sweeps (default 300 = 5min)
+#   GPU_MAX_JOBS             — Maximum concurrent entries in _jobs dict (default 100)
+#
+# When a job is evicted, its output_dir on disk is also deleted (if inside WORK_DIR).
 
-JOB_TTL_SECONDS = 3600      # Remove completed/failed jobs older than 1 hour
-JOB_CLEANUP_INTERVAL = 300  # Run cleanup every 5 minutes
-MAX_JOBS = 100               # Reject new jobs if _jobs exceeds this limit
+import shutil
+
+JOB_TTL_SECONDS = int(os.environ.get("GPU_JOB_TTL", "3600"))
+JOB_RUNNING_TTL = int(os.environ.get("GPU_JOB_RUNNING_TTL", "7200"))
+JOB_CLEANUP_INTERVAL = int(os.environ.get("GPU_JOB_CLEANUP_INTERVAL", "300"))
+MAX_JOBS = int(os.environ.get("GPU_MAX_JOBS", "100"))
 
 
-def _cleanup_old_jobs() -> int:
-    """Remove completed/failed jobs older than JOB_TTL_SECONDS.
+def _delete_job_output(job: dict) -> bool:
+    """Delete the on-disk output directory of a job, with safety checks.
 
-    Returns the number of jobs removed.
+    Only deletes if output_dir is set and resolves inside WORK_DIR.
+    Returns True if a directory was deleted, False otherwise.
+    """
+    output_dir = job.get("output_dir")
+    if not output_dir:
+        return False
+    try:
+        resolved = Path(output_dir).resolve()
+        work_resolved = WORK_DIR.resolve()
+        # Refuse to delete WORK_DIR itself or anything outside it
+        if resolved == work_resolved:
+            return False
+        if not str(resolved).startswith(str(work_resolved) + os.sep):
+            return False
+        if not resolved.exists():
+            return False
+        shutil.rmtree(resolved)
+        return True
+    except Exception as exc:
+        print(f"[Vision3D] Failed to delete output dir {output_dir}: {exc}")
+        return False
+
+
+def _cleanup_old_jobs() -> tuple[int, int]:
+    """Evict expired jobs and delete their output directories.
+
+    Two TTL classes:
+      - completed/failed jobs: evicted after JOB_TTL_SECONDS
+      - running jobs:          force-failed + evicted after JOB_RUNNING_TTL (zombie protection)
+
+    Returns (jobs_removed, dirs_deleted).
     """
     now = time.time()
-    expired = [
-        jid for jid, job in _jobs.items()
-        if job["status"] in ("completed", "failed")
-        and (now - job["created"]) > JOB_TTL_SECONDS
-    ]
+    expired = []
+    for jid, job in _jobs.items():
+        age = now - job["created"]
+        status = job["status"]
+        if status in ("completed", "failed") and age > JOB_TTL_SECONDS:
+            expired.append(jid)
+        elif status == "running" and age > JOB_RUNNING_TTL:
+            expired.append(jid)
+
+    dirs_deleted = 0
     for jid in expired:
+        if _delete_job_output(_jobs[jid]):
+            dirs_deleted += 1
         del _jobs[jid]
-    return len(expired)
+    return len(expired), dirs_deleted
 
 
 async def _job_cleanup_loop():
     """Background task that periodically cleans up expired jobs."""
     while True:
         await asyncio.sleep(JOB_CLEANUP_INTERVAL)
-        n = _cleanup_old_jobs()
-        if n > 0:
-            print(f"[Vision3D] Cleaned {n} expired jobs")
+        try:
+            n_jobs, n_dirs = _cleanup_old_jobs()
+            if n_jobs > 0:
+                print(f"[Vision3D] Cleaned {n_jobs} expired jobs ({n_dirs} output dirs deleted)")
+        except Exception as exc:
+            print(f"[Vision3D] Job cleanup loop error: {exc}")
 
 
 def _check_max_jobs():
@@ -373,11 +465,109 @@ def _unload_shape_pipeline():
     print("[Shape] VRAM freed.")
 
 
+# ── Paint pipeline progress markers (B3 strategy) ───────────────────────────
+#
+# Hunyuan3D's Hunyuan3DPaintPipeline.__call__ is opaque and accepts no progress
+# callback (texgen/pipelines.py:216). Its 5 internal phases — delight, mesh
+# rendering, multiview diffusion, super-resolution, bake/inpaint — are not
+# exposed.
+#
+# To surface progress without copy-pasting upstream code, we monkey-patch the
+# three inner model classes that delineate the long-running phases:
+#
+#   1. Light_Shadow_Remover     →  marker "delight"     (~10%)
+#   2. Multiview_Diffusion_Net  →  marker "multiview"   (~50%, ~30 diffusion steps)
+#   3. Image_Super_Net          →  marker "super-res"   (~80%, called in a loop, dedup'd)
+#
+# The bake/inpaint final phase has no inner class to hook; the scope context
+# manager emits 100% when paint() returns.
+#
+# Patches are installed lazily on first paint pipeline load to avoid importing
+# hy3dgen at module import time (slow, and unavailable on MPS-only setups).
+#
+# Concurrency: a single module-level slot (_paint_current_job) tracks the
+# active job. This is safe because _gpu_semaphore guarantees a single inference
+# job at a time.
+
+_paint_current_job: Optional[str] = None
+_paint_patched = False
+
+
+def _patch_paint_progress():
+    """Monkey-patch hy3dgen inner model classes to emit progress markers.
+
+    Idempotent. Failures are logged but never raised — if hy3dgen layout
+    changes, paint still works, only progress markers go missing.
+    """
+    global _paint_patched
+    if _paint_patched:
+        return
+    try:
+        from hy3dgen.texgen.utils.dehighlight_utils import Light_Shadow_Remover
+        from hy3dgen.texgen.utils.multiview_utils import Multiview_Diffusion_Net
+        from hy3dgen.texgen.utils.imagesuper_utils import Image_Super_Net
+    except ImportError as exc:
+        print(f"[Paint] Progress markers disabled (hy3dgen import failed): {exc}")
+        _paint_patched = True
+        return
+
+    def _make_marker(orig_call, percent: float, message: str, dedupe: bool = False):
+        def _wrapped(self, *args, **kwargs):
+            jid = _paint_current_job
+            if jid is not None:
+                job = _jobs.get(jid)
+                # dedupe=True: skip if we are already in this stage at this percent
+                # (Image_Super_Net is invoked in a loop — only the first call fires)
+                already_here = (
+                    dedupe
+                    and job
+                    and job["progress"]["stage"] == "paint"
+                    and abs(job["progress"]["percent"] - percent) < 0.5
+                )
+                if not already_here:
+                    _job_progress(jid, "paint", percent, message)
+            return orig_call(self, *args, **kwargs)
+        return _wrapped
+
+    Light_Shadow_Remover.__call__ = _make_marker(
+        Light_Shadow_Remover.__call__, 10.0, "delight (light & shadow removal)"
+    )
+    Multiview_Diffusion_Net.__call__ = _make_marker(
+        Multiview_Diffusion_Net.__call__, 50.0, "multiview diffusion (~30 steps)"
+    )
+    Image_Super_Net.__call__ = _make_marker(
+        Image_Super_Net.__call__, 80.0, "image super-resolution", dedupe=True
+    )
+    _paint_patched = True
+    print("[Paint] Progress markers installed (delight 10% / mvd 50% / super 80%)")
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _paint_progress_scope(job_id: str):
+    """Bind a job to the paint progress markers for the duration of paint().
+
+    Sets _paint_current_job, emits a 0% start marker, runs the body, emits a
+    100% completion marker, then clears the slot. Always cleans up on exception.
+    """
+    global _paint_current_job
+    _paint_current_job = job_id
+    _job_progress(job_id, "paint", 0.0, "starting paint pipeline")
+    try:
+        yield
+        _job_progress(job_id, "paint", 100.0, "paint complete")
+    finally:
+        _paint_current_job = None
+
+
 def _get_paint_pipeline():
     global _paint_pipeline
     if _paint_pipeline is None:
         try:
             from hy3dgen.texgen.pipelines import Hunyuan3DPaintPipeline
+            _patch_paint_progress()
 
             if os.path.isdir(MODELS_DIR):
                 print(f"[Paint] Loading from local: {MODELS_DIR}", flush=True)
@@ -482,12 +672,16 @@ def _run_shape_from_image(
             pass
 
     _job_log(job_id, f"[3/5] Generating 3D shape (octree={octree_resolution}, steps={num_inference_steps})...")
+    _job_progress(job_id, "shape", 0.0, f"step 0/{num_inference_steps}")
     result = pipeline(
         image=image,
         octree_resolution=octree_resolution,
         num_inference_steps=num_inference_steps,
+        callback=_make_diffusion_callback(job_id, "shape", num_inference_steps),
+        callback_steps=1,
     )
     mesh = result[0]
+    _job_progress(job_id, "shape", 100.0, "shape complete")
     _job_log(
         job_id,
         f"      Generated: {len(mesh.vertices):,} verts | {len(mesh.faces):,} faces",
@@ -553,13 +747,17 @@ def _run_shape_from_text(
     _job_log(job_id, f"[2/8] Generating reference image...")
     _job_log(job_id, f"      Prompt: '{text_prompt}'")
     _job_log(job_id, f"      Enhanced: '{enhanced_prompt}'")
+    _job_progress(job_id, "t2i", 0.0, "step 0/4")
     sdxl_result = t2i(
         prompt=enhanced_prompt,
         num_inference_steps=4,
         guidance_scale=0.0,
         height=512,
         width=512,
+        callback=_make_diffusion_callback(job_id, "t2i", 4),
+        callback_steps=1,
     )
+    _job_progress(job_id, "t2i", 100.0, "t2i complete")
     ref_image = sdxl_result.images[0]
     if ref_image is None:
         raise RuntimeError(
@@ -598,11 +796,15 @@ def _run_shape_from_text(
     pipeline = _get_shape_pipeline(model)
 
     _job_log(job_id, f"[4/8] Generating 3D shape (octree={octree_resolution}, steps={num_inference_steps})...")
+    _job_progress(job_id, "shape", 0.0, f"step 0/{num_inference_steps}")
     result = pipeline(
         image=ref_image,
         octree_resolution=octree_resolution,
         num_inference_steps=num_inference_steps,
+        callback=_make_diffusion_callback(job_id, "shape", num_inference_steps),
+        callback_steps=1,
     )
+    _job_progress(job_id, "shape", 100.0, "shape complete")
     mesh = result[0]
     orig_faces = len(mesh.faces)
     _job_log(job_id, f"      Generated: {len(mesh.vertices):,} verts | {orig_faces:,} faces")
@@ -640,7 +842,8 @@ def _run_shape_from_text(
         _job_log(job_id, "⚠ Paint pipeline unavailable — skipping texturing, returning mesh only")
     else:
         _job_log(job_id, "[7/8] Painting texture (~2-5 min)...")
-        textured = paint(paint_mesh, ref_image)
+        with _paint_progress_scope(job_id):
+            textured = paint(paint_mesh, ref_image)
 
         _job_log(job_id, "[8/8] Saving textured results...")
 
@@ -947,7 +1150,8 @@ def _run_texture(
 
     _job_log(job_id, f"[3/4] Texturing with image (~2-5 min)...")
     image = Image.open(image_path)
-    textured = pipeline(mesh, image)
+    with _paint_progress_scope(job_id):
+        textured = pipeline(mesh, image)
 
     _job_log(job_id, "[4/4] Saving results...")
     files = []
@@ -1024,11 +1228,15 @@ def _run_full_pipeline(
             pass
 
     _job_log(job_id, f"[3/6] Generating 3D shape (octree={octree_resolution}, steps={num_inference_steps})...")
+    _job_progress(job_id, "shape", 0.0, f"step 0/{num_inference_steps}")
     result = pipeline(
         image=image,
         octree_resolution=octree_resolution,
         num_inference_steps=num_inference_steps,
+        callback=_make_diffusion_callback(job_id, "shape", num_inference_steps),
+        callback_steps=1,
     )
+    _job_progress(job_id, "shape", 100.0, "shape complete")
     mesh = result[0]
     orig_faces = len(mesh.faces)
     _job_log(job_id, f"      Generated: {len(mesh.vertices):,} verts | {orig_faces:,} faces")
@@ -1067,7 +1275,8 @@ def _run_full_pipeline(
     else:
         ref_image = Image.open(image_path)
         _job_log(job_id, "[5/6] Painting texture (~2-5 min)...")
-        textured = paint(paint_mesh, ref_image)
+        with _paint_progress_scope(job_id):
+            textured = paint(paint_mesh, ref_image)
 
         _job_log(job_id, "[6/6] Saving textured results...")
 
@@ -1152,7 +1361,11 @@ async def lifespan(app: FastAPI):
     print(f"[Vision3D] API key:    {'configured' if API_KEY else 'NONE (open access)'}")
     # Start background job cleanup task (Phase 8.2 — Bug #2 fix)
     cleanup_task = asyncio.create_task(_job_cleanup_loop())
-    print(f"[Vision3D] Job cleanup: every {JOB_CLEANUP_INTERVAL}s, TTL {JOB_TTL_SECONDS}s, max {MAX_JOBS} jobs")
+    print(
+        f"[Vision3D] Job cleanup: every {JOB_CLEANUP_INTERVAL}s | "
+        f"TTL completed={JOB_TTL_SECONDS}s running={JOB_RUNNING_TTL}s | "
+        f"max {MAX_JOBS} jobs | output dirs deleted on expiry"
+    )
     yield
     cleanup_task.cancel()  # Stop cleanup on shutdown
 
@@ -1459,6 +1672,7 @@ async def stream_job(
 
     async def event_generator():
         last_log_len = 0
+        last_progress_seq = -1
 
         while True:
             j = _jobs.get(job_id)
@@ -1471,6 +1685,19 @@ async def stream_job(
                 for line in j["log"][last_log_len:]:
                     yield f"event: log\ndata: {line}\n\n"
                 last_log_len = len(j["log"])
+
+            # Send a 'progress' event when the worker has bumped the counter.
+            # Format: JSON {stage, progress, message} — the field is named
+            # "progress" (not "percent") to match the public contract.
+            prog = j.get("progress")
+            if prog and prog["updated"] != last_progress_seq:
+                last_progress_seq = prog["updated"]
+                payload = json.dumps({
+                    "stage": prog["stage"],
+                    "progress": round(prog["percent"], 1),
+                    "message": prog["message"],
+                })
+                yield f"event: progress\ndata: {payload}\n\n"
 
             elapsed = round(time.time() - j["created"], 1)
 
@@ -1486,7 +1713,8 @@ async def stream_job(
                 break
 
             yield f"event: status\ndata: running\n\n"
-            await asyncio.sleep(2)
+            # Faster poll than before (was 2s) so progress updates feel fluid.
+            await asyncio.sleep(0.5)
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -1821,17 +2049,37 @@ async function submitJob(e) {
     const streamUrl = '/api/jobs/' + job.job_id + '/stream' + (apiKey ? '?x_api_key='+apiKey : '');
     const es = new EventSource(streamUrl);
 
-    let progress = 10;
+    // Log lines arrive as plain text — no longer drives the progress bar.
     es.addEventListener('log', (ev) => {
       const text = ev.data;
       const cls = text.includes('===') || text.includes('═══') ? 'phase' : text.includes('COMPLETE') ? 'done' : '';
       addLog(text, cls);
-      progress = Math.min(progress + 3, 90);
-      fill.style.width = progress + '%';
+    });
+
+    // Real per-stage progress from the worker. Each stage (t2i / shape / paint)
+    // reports its own 0-100; the bar resets on stage transitions, which makes
+    // the phase change obvious to the user.
+    let currentStage = '';
+    es.addEventListener('progress', (ev) => {
+      try {
+        const p = JSON.parse(ev.data);
+        if (p.stage !== currentStage) {
+          currentStage = p.stage;
+          addLog('▶ stage: ' + p.stage, 'phase');
+        }
+        fill.style.width = (p.progress || 0) + '%';
+        const msg = p.message ? ' — ' + p.message : '';
+        status.textContent = '[' + p.stage + '] ' + (p.progress || 0).toFixed(0) + '%' + msg;
+      } catch (e) {
+        console.warn('progress parse failed', e, ev.data);
+      }
     });
 
     es.addEventListener('status', (ev) => {
-      status.textContent = ev.data === 'running' ? 'Processing...' : ev.data;
+      // Only overwrite the status text when we have no live progress info.
+      if (!currentStage) {
+        status.textContent = ev.data === 'running' ? 'Processing...' : ev.data;
+      }
     });
 
     es.addEventListener('done', (ev) => {

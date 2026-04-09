@@ -97,23 +97,33 @@ class TestCleanupOldJobs:
     """Tests for _cleanup_old_jobs() — TTL-based job eviction."""
 
     def test_cleanup_removes_old_jobs(self, mock_job_old_completed, mock_job_old_failed, mock_job_running):
-        """Test 8: Old completed/failed jobs are removed; running jobs are kept."""
+        """Test 8: Old completed/failed jobs are removed; running jobs within
+        JOB_RUNNING_TTL are kept."""
         assert len(server._jobs) == 3
 
-        removed = server._cleanup_old_jobs()
+        removed, _dirs = server._cleanup_old_jobs()
 
         assert removed == 2
         assert mock_job_old_completed not in server._jobs
         assert mock_job_old_failed not in server._jobs
-        # Running job should NOT be removed, even if old
+        # Running job (still within JOB_RUNNING_TTL) must NOT be removed
         assert mock_job_running in server._jobs
 
     def test_cleanup_keeps_recent_jobs(self, mock_job_completed):
         """Test 8b: Recent completed jobs are NOT removed."""
         assert len(server._jobs) == 1
-        removed = server._cleanup_old_jobs()
+        removed, _dirs = server._cleanup_old_jobs()
         assert removed == 0
         assert mock_job_completed in server._jobs
+
+    def test_cleanup_removes_zombie_running_jobs(self, mock_job_zombie_running, mock_job_running):
+        """Test 8c: Running jobs older than JOB_RUNNING_TTL are evicted as
+        zombies; running jobs within the TTL are preserved."""
+        assert len(server._jobs) == 2
+        removed, _dirs = server._cleanup_old_jobs()
+        assert removed == 1
+        assert mock_job_zombie_running not in server._jobs
+        assert mock_job_running in server._jobs
 
 
 class TestValidateUpload:
