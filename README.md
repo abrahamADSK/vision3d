@@ -76,6 +76,30 @@ Open `http://YOUR_GPU_HOST:8000` in a browser.
 - `custom_rasterizer` is **not** needed on MPS — texturing is not yet supported on Mac (shape generation only).
 - Generation verified: 355k vertices, 710k faces.
 
+#### Verified stack on Apple Silicon (M4 Pro, 48 GB)
+
+After an extensive debugging session, the following stack is confirmed working end-to-end (shape + texture) on macOS via the [hunyuan3d-mac](https://github.com/abrahamADSK/hunyuan3d-mac) fork:
+
+| Component | Version |
+|---|---|
+| macOS | 26.3.1 (Tahoe) |
+| Python | 3.13.9 |
+| PyTorch | **2.6.0** (pinned) |
+| torchvision | 0.21.0 |
+| torchaudio | 2.6.0 |
+| diffusers | 0.37.1 |
+| transformers | 5.5.0 |
+| accelerate | 1.13.0 |
+
+> [!WARNING]
+> **Do not upgrade PyTorch beyond 2.6.0 on macOS/MPS.** PyTorch 2.7+ introduced an MPS regression that causes diffusion pipelines to produce noise/NaN output even in fp32 (confirmed on torch 2.11.0). The previous known-good 2.4.1 has no cp313 wheels, so 2.6.0 is the oldest version usable on Python 3.13. CUDA is unaffected.
+
+**fp16 is unsafe on MPS for some SD-based UNets.** Specifically, the Hunyuan3D multiview UNet and the SD x4 upscaler emit `invalid value encountered in cast` (NaN) warnings in fp16 on MPS with torch 2.6.0. The fix — load those two pipelines in fp32 when `device == 'mps'` — is applied in the [hunyuan3d-mac](https://github.com/abrahamADSK/hunyuan3d-mac) fork. The delight pipeline remains stable in fp16. This is a per-model issue, not a blanket MPS limitation.
+
+**Rebuild C++ extensions after any torch version change.** PyTorch native extensions (e.g. `custom_rasterizer_kernel`, `mesh_processor` in the hunyuan3d-mac fork) break ABI between minor torch releases. Symptom when not rebuilt: `Symbol not found: __ZNK3c10*` at import time. Reinstall the extensions in editable mode after upgrading or downgrading torch.
+
+**Texturing benchmark (M4 Pro, 48 GB unified memory)**: full image-to-textured-mesh pipeline 626 s end-to-end, peak memory 23.8 GB (49.5 % of unified RAM), zero NaN warnings, visual quality verified.
+
 ### 4. (Optional) Install as systemd service
 
 ```bash
