@@ -21,12 +21,15 @@ if "torch" not in sys.modules:
     _torch_mock.cuda.is_available.return_value = False
     _torch_mock.cuda.empty_cache = MagicMock()
     _torch_mock.cuda.synchronize = MagicMock()
+    _torch_mock.backends.mps.is_available.return_value = False
+    _torch_mock.mps.empty_cache = MagicMock()
     sys.modules["torch"] = _torch_mock
 
 # Mock ML-heavy optional imports that server.py may try to load
 for mod_name in [
     "hy3dgen", "hy3dgen.rembg", "trimesh", "pyfqmr", "numpy",
     "diffusers", "transformers", "accelerate", "PIL", "PIL.Image",
+    "psutil",
 ]:
     if mod_name not in sys.modules:
         sys.modules[mod_name] = MagicMock()

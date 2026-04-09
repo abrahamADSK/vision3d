@@ -380,7 +380,7 @@ def _get_paint_pipeline():
             from hy3dgen.texgen.pipelines import Hunyuan3DPaintPipeline
 
             if os.path.isdir(MODELS_DIR):
-                print(f"[Paint] Loading from local: {MODELS_DIR}")
+                print(f"[Paint] Loading from local: {MODELS_DIR}", flush=True)
                 if DEVICE == "mps":
                     _paint_pipeline = Hunyuan3DPaintPipeline.from_pretrained(MODELS_DIR)
                 else:
@@ -399,7 +399,7 @@ def _get_paint_pipeline():
                     )
         except Exception as e:
             import traceback
-            print(f"[Paint] WARNING: Paint pipeline failed to load: {e}")
+            print(f"[Paint] WARNING: Paint pipeline failed to load: {e}", flush=True)
             traceback.print_exc()
             return None
     return _paint_pipeline
