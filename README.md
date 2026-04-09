@@ -68,6 +68,39 @@ Safe to run multiple times (idempotent).
 
 Open `http://YOUR_GPU_HOST:8000` in a browser.
 
+### 4. Backend selection (local MPS vs remote CUDA) — v1.5.0+
+
+At startup, `server.py` asks where to run inference:
+
+```
+Run locally? [y/N]: n
+Remote host [glorfindel]:
+→ Connected to http://glorfindel:8000
+```
+
+- Answer `y` → run inference **locally** (Apple Silicon MPS or local CUDA).
+- Answer `n` (or just press Enter) → enter a **remote host**. The default is `glorfindel`. The local server validates `GET http://{host}:8000/api/health` with a 5 s timeout and loops until a remote answers.
+
+In remote mode the local process becomes a thin **HTTP façade**: every `/api/*` call (generation, polling, file downloads, SSE progress stream) is proxied to the remote vision3d instance. There is **zero local job state** — job IDs are owned by the remote. The local web UI is unaware of the difference. This is useful when you want to develop and test from a Mac while delegating the heavy CUDA work to a Linux GPU box.
+
+#### Skipping the prompt (CI / scripts)
+
+```bash
+.venv/bin/python server.py --local                    # force local
+.venv/bin/python server.py --remote glorfindel        # force remote
+.venv/bin/python server.py --reload                   # forces local (prompt incompatible with reload)
+```
+
+#### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `VISION3D_REMOTE_HOST` | unset | If set, the server starts in remote mode without prompting. Set automatically by `--remote` and by the interactive prompt (so uvicorn workers and `--reload` inherit it). |
+| `VISION3D_REMOTE_PORT` | `8000` | Port on the remote host. |
+| `VISION3D_REMOTE_KEY` | unset | API key forwarded to the remote on every proxied request. If unset, the inbound `x-api-key` from the local client is forwarded as-is. |
+
+The local `GET /api/health` endpoint reports the active mode in its JSON response (`mode: "local"` or `"remote"`, plus `remote_host` / `remote_port` when applicable).
+
 ### Apple Silicon (MPS) notes
 
 - The Mac fork is [abrahamADSK/Hunyuan3D-2-Mac](https://github.com/abrahamADSK/Hunyuan3D-2-Mac) (a fork of Maxim-Lanskoy/Hunyuan3D-2-Mac with the MPS texturing fixes). Clone it **outside** the vision3d repo — `install.sh` searches for it in `../hunyuan3d-mac`, `~/Projects/hunyuan3d-mac`, and `~/Claude_projects/hunyuan3d-mac`.

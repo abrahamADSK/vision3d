@@ -2,26 +2,48 @@
 """
 server.py — FastAPI inference server for Vision3D.
 
-Runs on the GPU machine and exposes REST endpoints
-for shape generation (image-to-3D, text-to-3D) and texture painting.
-Replaces the previous SSH-based communication.
+Runs locally on Apple Silicon (MPS) or on a CUDA GPU machine, and exposes
+REST endpoints for shape generation (image-to-3D, text-to-3D) and texture
+painting. Replaces the previous SSH-based communication.
+
+Backend modes (introduced in v1.5.0):
+    LOCAL  — runs inference on this machine (MPS / CUDA / CPU)
+    REMOTE — proxies every /api/* call to another vision3d host (e.g. a
+             local Mac façade delegating heavy work to a CUDA box). All
+             generation, polling, downloads, and SSE streams pass through
+             transparently. Job IDs are owned by the remote.
+
+At startup the entry point asks interactively:
+    Run locally? [y/N]:
+    Remote host [glorfindel]:
+The selected mode applies to the whole session and is persisted via env
+var so uvicorn workers / --reload pick it up.
 
 Endpoints:
     POST /api/generate-shape    — image → mesh.glb
     POST /api/generate-text     — text prompt → mesh.glb
     POST /api/texture-mesh      — mesh + image → textured mesh
-    GET  /api/health            — health check
+    POST /api/generate-full     — image → shape + decimate + texture
+    GET  /api/health            — health check (reports active mode)
     GET  /api/jobs/{job_id}     — job status + download
+    GET  /api/jobs/{job_id}/files/{filename}  — download a result file
+    GET  /api/jobs/{job_id}/stream            — Server-Sent Events progress
+    GET  /api/models, /api/presets            — metadata
 
 Usage:
-    .venv/bin/python server.py --port 8000
+    .venv/bin/python server.py --port 8000             # interactive prompt
+    .venv/bin/python server.py --local                 # force local, no prompt
+    .venv/bin/python server.py --remote glorfindel     # force remote, no prompt
     .venv/bin/python server.py --host 0.0.0.0 --port 8000  # LAN access
 
 Environment:
-    GPU_API_KEY       — API key for authentication (empty = open access)
-    GPU_MODELS_DIR    — Model weights (default: ./hf_models)
-    GPU_WORK_DIR      — working directory for outputs (default: ./output)
-    GPU_VISION_DIR    — Vision3D installation directory (default: .)
+    GPU_API_KEY            — API key for authentication (empty = open access)
+    GPU_MODELS_DIR         — Model weights (default: ./hf_models)
+    GPU_WORK_DIR           — Working directory for outputs (default: ./output)
+    GPU_VISION_DIR         — Vision3D installation directory (default: .)
+    VISION3D_REMOTE_HOST   — If set, proxy mode is active (set by prompt or --remote)
+    VISION3D_REMOTE_PORT   — Remote port (default: 8000)
+    VISION3D_REMOTE_KEY    — API key forwarded to remote (default: pass through client key)
 """
 
 import asyncio

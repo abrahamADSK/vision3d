@@ -1,13 +1,18 @@
 # Vision3D — Critical Context for Claude
 
-> **Last updated**: 2026-04-05 — Phase 8.3: Bug #6 + #7 fixes, 20 automated tests
-> **Audited against**: `server.py` (~1670 lines, commit at time of audit)
+> **Last updated**: 2026-04-09 — v1.5.0: interactive backend selection (local MPS / remote CUDA proxy)
+> **Audited against**: `server.py` (~2440 lines, commit `f77b8e7`)
 
 ---
 
 ## 1. Architecture
 
-**Vision3D** is a FastAPI server running on GPU machine **glorfindel** (Rocky Linux), exposing a REST API for 3D model generation using **Hunyuan3D-2** (Tencent) and **SDXL Turbo** (Stability AI).
+**Vision3D** is a FastAPI server for 3D model generation using **Hunyuan3D-2** (Tencent) and **SDXL Turbo** (Stability AI). Since v1.5.0 it can run in **two modes**:
+
+- **LOCAL** — inference runs on this machine (Apple Silicon MPS, NVIDIA CUDA, or CPU). Original behaviour. Used by the GPU box `glorfindel` (Rocky Linux + RTX 3090) and by Mac developers with M-series chips.
+- **REMOTE** — the local server acts as a thin **HTTP façade**: every `/api/*` call is proxied via `httpx` async to another vision3d instance (typically `glorfindel`). Zero local job state, zero GPU load. SSE streams pass through byte-for-byte. This lets a Mac front-end delegate heavy CUDA work to the GPU box while presenting the same web UI locally.
+
+The mode is chosen at startup by an interactive prompt (`Run locally? [y/N]:` → `Remote host [glorfindel]:`) and persisted via env var `VISION3D_REMOTE_HOST` so uvicorn workers and `--reload` pick it up. CLI flags `--local` and `--remote HOST` skip the prompt.
 
 Eleven REST endpoints + embedded Web UI:
 - **image-to-3D** (`POST /api/generate-shape`): Image → 3D mesh (`.glb`)
@@ -53,6 +58,9 @@ Eleven REST endpoints + embedded Web UI:
 | `GPU_MODELS_DIR` | `./hf_models` (relative to script) | Model weights directory |
 | `GPU_WORK_DIR` | `./output` (relative to script) | Job output directory |
 | `GPU_VISION_DIR` | `.` (script directory) | Vision3D installation root |
+| `VISION3D_REMOTE_HOST` | unset | If set, server runs in **remote proxy mode** (set automatically by `--remote` and by the interactive prompt) |
+| `VISION3D_REMOTE_PORT` | `8000` | Port on the remote vision3d host |
+| `VISION3D_REMOTE_KEY` | unset | API key forwarded to the remote (default: pass through inbound `x-api-key`) |
 
 ### Systemd service
 - **File**: `/etc/systemd/system/vision3d.service`
@@ -61,12 +69,15 @@ Eleven REST endpoints + embedded Web UI:
 
 ### CLI Arguments
 ```bash
-.venv/bin/python server.py --host 0.0.0.0 --port 8000   # defaults
+.venv/bin/python server.py --host 0.0.0.0 --port 8000   # defaults — interactive prompt
 .venv/bin/python server.py --port 9000                    # custom port
-.venv/bin/python server.py --reload                       # auto-reload on code changes
+.venv/bin/python server.py --reload                       # auto-reload (forces local; prompt incompatible)
+.venv/bin/python server.py --local                        # skip prompt, force local backend
+.venv/bin/python server.py --remote glorfindel            # skip prompt, proxy to glorfindel
 ```
 - `--host`: bind address (default: `0.0.0.0`)
 - `--port`: port (default: `8000`)
+- `--local` / `--remote HOST`: bypass the interactive backend prompt (v1.5.0+)
 - `--reload`: uvicorn auto-reload for development
 
 ---
