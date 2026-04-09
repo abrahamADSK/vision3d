@@ -83,6 +83,42 @@ VISION_DIR = Path(
     )
 )
 
+# ── Backend mode (local vs remote delegation) ───────────────────────────────
+#
+# Set by interactive prompt at startup (see _prompt_backend_selection).
+# Persisted via env var because uvicorn re-imports this module on worker spawn
+# and on --reload, so we cannot rely on module-level mutation from __main__.
+#
+#   VISION3D_REMOTE_HOST  → if set, all generation endpoints proxy to this host
+#   VISION3D_REMOTE_PORT  → port on remote (default 8000)
+#   VISION3D_REMOTE_KEY   → optional API key forwarded to remote (defaults to
+#                            the inbound x-api-key from the local client)
+
+REMOTE_HOST: Optional[str] = os.environ.get("VISION3D_REMOTE_HOST") or None
+REMOTE_PORT: int = int(os.environ.get("VISION3D_REMOTE_PORT", "8000"))
+REMOTE_BASE: Optional[str] = (
+    f"http://{REMOTE_HOST}:{REMOTE_PORT}" if REMOTE_HOST else None
+)
+REMOTE_KEY: Optional[str] = os.environ.get("VISION3D_REMOTE_KEY") or None
+
+
+def _is_remote() -> bool:
+    """True if this server should delegate generation to a remote host."""
+    return REMOTE_BASE is not None
+
+
+def _remote_url(path: str) -> str:
+    """Build a fully-qualified URL on the configured remote host."""
+    return f"{REMOTE_BASE}{path}"
+
+
+def _remote_headers(inbound_api_key: Optional[str]) -> dict:
+    """Forward an API key to the remote: explicit REMOTE_KEY wins, else
+    pass through the client-supplied x-api-key."""
+    key = REMOTE_KEY or inbound_api_key
+    return {"x-api-key": key} if key else {}
+
+
 # ── Job tracking ─────────────────────────────────────────────────────────────
 
 _jobs: dict[str, dict] = {}
@@ -1377,10 +1413,132 @@ app = FastAPI(
 )
 
 
+# ── Remote-delegation proxy helpers ──────────────────────────────────────────
+#
+# In remote mode, the local server acts as a thin façade: every generation
+# call is forwarded to REMOTE_HOST and the response is returned verbatim.
+# Job IDs are owned by the remote — the local server keeps no job state.
+
+async def _proxy_post(
+    path: str,
+    *,
+    files: Optional[dict] = None,
+    data: Optional[dict] = None,
+    inbound_api_key: Optional[str] = None,
+):
+    """Forward a multipart/form POST to the remote and return its JSON.
+
+    HTTPException is raised when the remote rejects the request, so the
+    local FastAPI layer surfaces the same status code to the caller.
+    """
+    import httpx
+    url = _remote_url(path)
+    headers = _remote_headers(inbound_api_key)
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.post(url, files=files, data=data, headers=headers)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Remote unreachable: {exc}")
+    if r.status_code >= 400:
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    return r.json()
+
+
+async def _proxy_get(
+    path: str,
+    *,
+    params: Optional[dict] = None,
+    inbound_api_key: Optional[str] = None,
+):
+    """Forward a GET to the remote and return its JSON."""
+    import httpx
+    url = _remote_url(path)
+    headers = _remote_headers(inbound_api_key)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.get(url, params=params, headers=headers)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Remote unreachable: {exc}")
+    if r.status_code >= 400:
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    return r.json()
+
+
+async def _proxy_get_stream_file(
+    path: str,
+    *,
+    filename: str,
+    inbound_api_key: Optional[str] = None,
+):
+    """Stream a binary file from the remote (for /api/jobs/.../files/...)."""
+    import httpx
+    url = _remote_url(path)
+    headers = _remote_headers(inbound_api_key)
+
+    async def body():
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("GET", url, headers=headers) as r:
+                if r.status_code >= 400:
+                    text = await r.aread()
+                    raise HTTPException(status_code=r.status_code, detail=text.decode("utf-8", "replace"))
+                async for chunk in r.aiter_bytes():
+                    yield chunk
+
+    return StreamingResponse(
+        body(),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+async def _proxy_sse(path: str, *, inbound_api_key: Optional[str] = None,
+                     query_api_key: Optional[str] = None):
+    """Proxy a Server-Sent Events stream byte-for-byte from the remote.
+
+    SSE clients (browser EventSource) cannot send custom headers, so we also
+    forward the API key as a query param when supplied that way.
+    """
+    import httpx
+    url = _remote_url(path)
+    headers = _remote_headers(inbound_api_key)
+    params = {"x_api_key": query_api_key} if query_api_key else None
+
+    async def body():
+        async with httpx.AsyncClient(timeout=None) as client:
+            try:
+                async with client.stream("GET", url, headers=headers, params=params) as r:
+                    if r.status_code >= 400:
+                        text = await r.aread()
+                        yield f"event: error\ndata: remote {r.status_code}: {text.decode('utf-8', 'replace')}\n\n".encode()
+                        return
+                    async for chunk in r.aiter_raw():
+                        yield chunk
+            except httpx.HTTPError as exc:
+                yield f"event: error\ndata: remote unreachable: {exc}\n\n".encode()
+
+    return StreamingResponse(
+        body(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.get("/api/health")
 async def health():
     """Health check — returns GPU info if available."""
-    info = {"status": "ok", "api_key_required": bool(API_KEY), "device": DEVICE}
+    info = {
+        "status": "ok",
+        "api_key_required": bool(API_KEY),
+        "device": DEVICE,
+        "mode": "remote" if _is_remote() else "local",
+    }
+    if _is_remote():
+        info["remote_host"] = REMOTE_HOST
+        info["remote_port"] = REMOTE_PORT
     try:
         import torch
 
@@ -1422,12 +1580,31 @@ async def generate_shape(
     """Upload an image, get a 3D mesh back (async job)."""
     _verify_api_key(x_api_key, client_host=request.client.host if request and request.client else None)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
+
+    # Validate upload first — needed for both local and remote paths because
+    # an UploadFile can only be consumed once.
+    image_content = await _validate_upload(image, ALLOWED_IMAGE_TYPES)
+
+    if _is_remote():
+        # Delegate the whole job to the remote backend. Do NOT touch local
+        # disk, GPU semaphore, or _jobs — the remote owns the job lifecycle.
+        return await _proxy_post(
+            "/api/generate-shape",
+            files={"image": (image.filename or "input.png", image_content, image.content_type or "image/png")},
+            data={
+                "output_subdir": output_subdir,
+                "target_faces": str(target_faces),
+                "preset": preset,
+                "model": model,
+                "octree_resolution": str(octree_resolution),
+                "num_inference_steps": str(num_inference_steps),
+            },
+            inbound_api_key=x_api_key,
+        )
+
     output_subdir = _resolve_output_subdir(output_subdir)   # Unique dir if default (Bug #6)
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
     _check_max_jobs()  # Reject if too many jobs in memory (Phase 8.2)
-
-    # Validate upload: MIME type + size (Phase 8.2 — Bug #5 fix)
-    image_content = await _validate_upload(image, ALLOWED_IMAGE_TYPES)
 
     params = _resolve_preset(target_faces, preset, model, octree_resolution, num_inference_steps)
     job_id = _new_job("shape-image", f"subdir={output_subdir}, target_faces={params['target_faces']}")
@@ -1464,6 +1641,22 @@ async def generate_text(
     """Generate 3D mesh from text prompt (async job)."""
     _verify_api_key(x_api_key, client_host=request.client.host if request and request.client else None)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
+
+    if _is_remote():
+        return await _proxy_post(
+            "/api/generate-text",
+            data={
+                "text_prompt": text_prompt,
+                "output_subdir": output_subdir,
+                "target_faces": str(target_faces),
+                "preset": preset,
+                "model": model,
+                "octree_resolution": str(octree_resolution),
+                "num_inference_steps": str(num_inference_steps),
+            },
+            inbound_api_key=x_api_key,
+        )
+
     output_subdir = _resolve_output_subdir(output_subdir)   # Unique dir if default (Bug #6)
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
     _check_max_jobs()  # Reject if too many jobs in memory (Phase 8.2)
@@ -1494,13 +1687,25 @@ async def texture_mesh(
     """Upload mesh + image, get textured mesh back (async job)."""
     _verify_api_key(x_api_key, client_host=request.client.host if request and request.client else None)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
+
+    # Read uploads first — needed for both local and remote paths.
+    mesh_content = await _validate_upload(mesh, ALLOWED_MESH_TYPES)
+    image_content = await _validate_upload(image, ALLOWED_IMAGE_TYPES)
+
+    if _is_remote():
+        return await _proxy_post(
+            "/api/texture-mesh",
+            files={
+                "mesh": (mesh.filename or "mesh.glb", mesh_content, mesh.content_type or "model/gltf-binary"),
+                "image": (image.filename or "input.png", image_content, image.content_type or "image/png"),
+            },
+            data={"output_subdir": output_subdir},
+            inbound_api_key=x_api_key,
+        )
+
     output_subdir = _resolve_output_subdir(output_subdir)   # Unique dir if default (Bug #6)
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
     _check_max_jobs()  # Reject if too many jobs in memory (Phase 8.2)
-
-    # Validate uploads: MIME type + size (Phase 8.2 — Bug #5 fix)
-    mesh_content = await _validate_upload(mesh, ALLOWED_MESH_TYPES)
-    image_content = await _validate_upload(image, ALLOWED_IMAGE_TYPES)
 
     job_id = _new_job("texture", f"subdir={output_subdir}")
     out_dir = WORK_DIR / output_subdir
@@ -1525,6 +1730,9 @@ async def texture_mesh(
 async def get_job(job_id: str, x_api_key: Optional[str] = Header(None), request: Request = None):
     """Poll job status. When completed, includes download links."""
     _verify_api_key(x_api_key, client_host=request.client.host if request and request.client else None)
+
+    if _is_remote():
+        return await _proxy_get(f"/api/jobs/{job_id}", inbound_api_key=x_api_key)
 
     job = _jobs.get(job_id)
     if not job:
@@ -1556,6 +1764,13 @@ async def download_file(
     """Download a result file from a completed job."""
     _verify_api_key(x_api_key, client_host=request.client.host if request and request.client else None)
 
+    if _is_remote():
+        return await _proxy_get_stream_file(
+            f"/api/jobs/{job_id}/files/{filename}",
+            filename=filename,
+            inbound_api_key=x_api_key,
+        )
+
     job = _jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1577,12 +1792,16 @@ async def download_file(
 @app.get("/api/presets")
 async def get_presets():
     """Return available quality presets."""
+    if _is_remote():
+        return await _proxy_get("/api/presets")
     return QUALITY_PRESETS
 
 
 @app.get("/api/models")
 async def get_models():
     """Return available shape models (those with weights on disk)."""
+    if _is_remote():
+        return await _proxy_get("/api/models")
     available = _get_available_models()
     default = "full" if DEVICE == "mps" else "turbo"
     return {
@@ -1612,12 +1831,27 @@ async def generate_full(
     """
     _verify_api_key(x_api_key, client_host=request.client.host if request and request.client else None)
     output_subdir = _validate_output_subdir(output_subdir)  # Sanitize path traversal
+
+    image_content = await _validate_upload(image, ALLOWED_IMAGE_TYPES)
+
+    if _is_remote():
+        return await _proxy_post(
+            "/api/generate-full",
+            files={"image": (image.filename or "input.png", image_content, image.content_type or "image/png")},
+            data={
+                "output_subdir": output_subdir,
+                "target_faces": str(target_faces),
+                "preset": preset,
+                "model": model,
+                "octree_resolution": str(octree_resolution),
+                "num_inference_steps": str(num_inference_steps),
+            },
+            inbound_api_key=x_api_key,
+        )
+
     output_subdir = _resolve_output_subdir(output_subdir)   # Unique dir if default (Bug #6)
     _check_gpu_available()  # Reject if GPU is busy (OOM protection)
     _check_max_jobs()  # Reject if too many jobs in memory (Phase 8.2)
-
-    # Validate upload: MIME type + size (Phase 8.2 — Bug #5 fix)
-    image_content = await _validate_upload(image, ALLOWED_IMAGE_TYPES)
 
     params = _resolve_preset(target_faces, preset, model, octree_resolution, num_inference_steps)
     preset_label = preset or f"{params['target_faces']} faces"
@@ -1663,6 +1897,13 @@ async def stream_job(
     """
     # SSE auth: header first, query param fallback (Bug #4 fix — Phase 8.2)
     _verify_api_key(x_api_key, query_api_key=x_api_key_query, client_host=request.client.host if request and request.client else None)
+
+    if _is_remote():
+        return await _proxy_sse(
+            f"/api/jobs/{job_id}/stream",
+            inbound_api_key=x_api_key,
+            query_api_key=x_api_key_query,
+        )
 
     job = _jobs.get(job_id)
     if not job:
@@ -2145,6 +2386,46 @@ async function submitJob(e) {
 
 # ── Entry point ──────────────────────────────────────────────────────────────
 
+def _prompt_backend_selection() -> Optional[str]:
+    """Interactive backend chooser. Returns the remote hostname, or None for local.
+
+    Loops until a remote answers /api/health within 5s, or the user picks local.
+    Health endpoint is /api/health (the actual server path), not /health.
+    """
+    import httpx
+
+    default_host = "glorfindel"
+    while True:
+        try:
+            answer = input("Run locally? [y/N]: ").strip().lower()
+        except EOFError:
+            # No TTY (piped invocation) — fall back to local
+            print("[Vision3D] No interactive TTY; defaulting to local mode")
+            return None
+
+        if answer in ("y", "yes"):
+            return None
+
+        # Anything else (including empty) → remote selection
+        try:
+            host_in = input(f"Remote host [{default_host}]: ").strip()
+        except EOFError:
+            print("[Vision3D] No interactive TTY; defaulting to local mode")
+            return None
+        host = host_in or default_host
+
+        url = f"http://{host}:{REMOTE_PORT}/api/health"
+        try:
+            r = httpx.get(url, timeout=5.0)
+            r.raise_for_status()
+            print(f"→ Connected to http://{host}:{REMOTE_PORT}")
+            return host
+        except Exception as exc:
+            print(f"❌ Cannot reach {url}: {exc}")
+            print("   Try again.\n")
+            # Loop back to the top question
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -2152,7 +2433,31 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="Port (default: 8000)")
     parser.add_argument("--reload", action="store_true", help="Auto-reload on code changes")
+    parser.add_argument("--local", action="store_true",
+                        help="Skip the interactive prompt and force local mode")
+    parser.add_argument("--remote", metavar="HOST",
+                        help="Skip the interactive prompt and use this remote host")
     args = parser.parse_args()
+
+    # Resolve backend selection. The chosen value is persisted via env var so
+    # it survives uvicorn's module re-import (workers + --reload).
+    if args.local:
+        selected_remote = None
+    elif args.remote:
+        selected_remote = args.remote
+    elif args.reload:
+        # --reload spawns subprocess workers; an interactive prompt would
+        # break the loop. Force local in that case.
+        print("[Vision3D] --reload mode: skipping prompt, using local backend")
+        selected_remote = None
+    else:
+        selected_remote = _prompt_backend_selection()
+
+    if selected_remote:
+        os.environ["VISION3D_REMOTE_HOST"] = selected_remote
+    else:
+        # Make sure no stale env var leaks in from the parent shell
+        os.environ.pop("VISION3D_REMOTE_HOST", None)
 
     uvicorn.run(
         "server:app",
