@@ -1,6 +1,6 @@
 # HANDOFF — vision3d
 
-**Last updated**: 2026-04-09 — v1.5.0 (interactive backend selection, local MPS / remote CUDA proxy)
+**Last updated**: 2026-04-10 — v1.5.1+ (Chat 29-30: Fast model MPS, torch 2.6.0+cu124 on glorfindel, documentation fixes)
 **Completitud**: ~99% (server funcional, dual-mode local/remote, 7/7 bugs históricos corregidos, 21 tests)
 
 ---
@@ -229,6 +229,24 @@ Estos problemas se encontraron en el código y están **documentados en CLAUDE.m
 - README.md, CLAUDE.md y docstring de cabecera de `server.py` actualizados.
 - Tests sin cambios (21/21 pasan — el código nuevo está guardado por env var).
 - Commits: `f77b8e7` (feat), `c5e80e6` (docs).
+
+### Chat 29-30 findings (2026-04-10) — Fast model MPS + torch upgrade + docs
+
+**Shape fast model confirmed MPS-compatible**: uses the same `FlowMatchEulerDiscreteScheduler` as the full model. Downloaded to Mac `hf_models/` (4.93 GB). Requires `PYTORCH_ENABLE_MPS_FALLBACK=1` (added to `server.py` before torch import, uncommitted until Chat 30).
+
+**torch upgraded on glorfindel**: 2.3.0+cu121 → 2.6.0+cu124. Required C++ extension rebuild (`custom_rasterizer`, `differentiable_renderer`) due to ABI mismatch. transformers 4.57.6 blocks torch < 2.6 (CVE-2025-32434), so downgrade was not viable.
+
+**Model compatibility matrix**:
+
+| Model | CUDA (glorfindel) | MPS (Mac M4 Pro) |
+|---|---|---|
+| Shape turbo | Yes (default) | No — missing `ConsistencyFlowMatchEulerDiscreteScheduler` in fork |
+| Shape fast | Yes | **Yes** — confirmed Chat 29, same scheduler as full |
+| Shape full | Yes | Yes (default on MPS) |
+| Paint turbo | Yes (always on CUDA) | No — needs fork changes |
+| Paint normal | Yes | Yes (since v1.3.0) |
+
+**Documentation fixes (Chat 30)**: README.md updated (MPS texturing works since v1.3.0, model compat table added, troubleshooting corrected). install.sh: C++ extension rebuild documented. HANDOFF.md: updated with this section.
 
 ### v1.4.0 (2026-04-09) — Real SSE progress events + job TTL
 - Nuevo evento SSE `progress` con JSON `{stage, progress, message}` alimentado por `_job_progress()`, `_make_diffusion_callback()` y `_paint_progress_scope()`.

@@ -30,6 +30,27 @@
 # Requires:  Python 3.10+
 # =============================================================================
 
+# =============================================================================
+# IMPORTANT: C++ extension rebuild after torch version changes
+# =============================================================================
+# PyTorch native extensions (custom_rasterizer, differentiable_renderer) are
+# compiled against a specific torch ABI version. After any torch upgrade or
+# downgrade, these extensions MUST be rebuilt:
+#
+#   1. Clean build directories:
+#        rm -rf <extension>/build/ <extension>/*.egg-info/
+#   2. Reinstall in editable mode:
+#        pip install -e <extension-path> --no-build-isolation --force-reinstall
+#
+# Symptom when not rebuilt: "Symbol not found: __ZNK3c10*" at import time,
+# or silent hangs in paint pipeline.
+#
+# The compiled .so files require torch to be imported first to resolve
+# libc10.so and other shared libraries. server.py handles this by importing
+# torch before any extension that depends on it. On Linux (systemd), the
+# LD_LIBRARY_PATH is set explicitly in setup.sh to include torch/lib/.
+# =============================================================================
+
 set -euo pipefail
 
 # ── Colour helpers ────────────────────────────────────────────────────────────

@@ -108,7 +108,7 @@ The local `GET /api/health` endpoint reports the active mode in its JSON respons
 - The Mac fork is [abrahamADSK/Hunyuan3D-2-Mac](https://github.com/abrahamADSK/Hunyuan3D-2-Mac) (a fork of Maxim-Lanskoy/Hunyuan3D-2-Mac with the MPS texturing fixes). Clone it **outside** the vision3d repo — `install.sh` searches for it in `../hunyuan3d-mac`, `~/Projects/hunyuan3d-mac`, and `~/Claude_projects/hunyuan3d-mac`.
 - Uses the base model `hunyuan3d-dit-v2-0` (not turbo) with `variant='fp16'`, `use_safetensors=True`.
 - Weights are downloaded automatically from HuggingFace on first run (~18.8 GB for `hunyuan3d-dit-v2-0`).
-- `custom_rasterizer` is **not** needed on MPS — texturing is not yet supported on Mac (shape generation only).
+- `custom_rasterizer` compiles on Mac via the [hunyuan3d-mac](https://github.com/abrahamADSK/Hunyuan3D-2-Mac) fork. Texturing works on MPS since v1.3.0.
 - Generation verified: 355k vertices, 710k faces.
 
 #### Verified stack on Apple Silicon (M4 Pro, 48 GB)
@@ -219,7 +219,7 @@ Browser / MCP client / curl
    ┌──────▼──────┐
    │  NVIDIA GPU  │  CUDA inference (shape + texture)
    │  — or —      │
-   │  Apple GPU   │  MPS inference (shape only)
+   │  Apple GPU   │  MPS inference (shape + texture)
    └─────────────┘
 ```
 
@@ -228,12 +228,24 @@ Browser / MCP client / curl
 | Model | Source | Size | Function |
 |-------|--------|------|----------|
 | `hunyuan3d-dit-v2-0-turbo` | Tencent/Hunyuan3D-2 | ~400 MB | 3D shape generation (CUDA — turbo) |
-| `hunyuan3d-dit-v2-0` | Tencent/Hunyuan3D-2 | ~18.8 GB | 3D shape generation (MPS — base model) |
+| `hunyuan3d-dit-v2-0-fast` | Tencent/Hunyuan3D-2 | ~4.93 GB | 3D shape generation (CUDA + MPS) |
+| `hunyuan3d-dit-v2-0` | Tencent/Hunyuan3D-2 | ~18.8 GB | 3D shape generation (CUDA + MPS — full/base model) |
 | `hunyuan3d-paint-v2-0-turbo` | Tencent/Hunyuan3D-2 | ~14 GB | Texture painting (CUDA only) |
+| `hunyuan3d-paint-v2-0` | Tencent/Hunyuan3D-2 | ~14 GB | Texture painting (CUDA + MPS) |
 | `hunyuan3d-delight-v2-0` | Tencent/Hunyuan3D-2 | ~4 GB | Relighting (paint dependency) |
 | `sdxl-turbo` | Stability AI | ~6 GB | Text → image (intermediate step) |
 
-> **Note:** The turbo shape model is not compatible with MPS — it requires `ConsistencyFlowMatchEulerDiscreteScheduler`, which is not available in the Mac fork. On Apple Silicon, `server.py` automatically selects the base `v2-0` model.
+### Model compatibility by platform
+
+| Model | Type | CUDA | MPS | Notes |
+|-------|------|------|-----|-------|
+| `hunyuan3d-dit-v2-0-turbo` | Shape | Yes | No | Requires `ConsistencyFlowMatchEulerDiscreteScheduler` (missing in Mac fork) |
+| `hunyuan3d-dit-v2-0-fast` | Shape | Yes | Yes | Requires `PYTORCH_ENABLE_MPS_FALLBACK=1` (set automatically by `server.py`) |
+| `hunyuan3d-dit-v2-0` (full) | Shape | Yes | Yes | Default on MPS |
+| `hunyuan3d-paint-v2-0-turbo` | Paint | Yes | No | Needs fork changes for MPS |
+| `hunyuan3d-paint-v2-0` (normal) | Paint | Yes | Yes | Since v1.3.0 via hunyuan3d-mac fork |
+
+> **Note:** On Apple Silicon, `server.py` automatically selects `full` as the default shape model and the normal paint model. The turbo variants require scheduler/fork changes not yet available on MPS.
 
 ## Project Structure
 
@@ -266,9 +278,9 @@ vision3d/
 - The turbo model requires `ConsistencyFlowMatchEulerDiscreteScheduler`, which does not exist in the Mac fork
 - Use the base model `hunyuan3d-dit-v2-0` instead — `server.py` selects it automatically on MPS
 
-**MPS: texturing not available**
-- `custom_rasterizer` does not compile on macOS — texturing is CUDA-only for now
-- Shape generation works fully on MPS
+**MPS: texturing issues**
+- Texturing works on MPS since v1.3.0 via the [hunyuan3d-mac](https://github.com/abrahamADSK/Hunyuan3D-2-Mac) fork. If you see rasterization errors, ensure you are using the fork (not upstream) and that `custom_rasterizer` compiled successfully.
+- Metal optimization of `custom_rasterizer` for better MPS performance is a future improvement (127 CUDA lines to port).
 
 ## Ecosystem
 
