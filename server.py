@@ -67,6 +67,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 
 # ── Device detection ─────────────────────────────────────────────────────────
 
+# Enable MPS fallback for ops not yet implemented on Apple Silicon (e.g.
+# _upsample_bilinear2d_aa used by the "fast" shape model).  The fallback
+# silently routes unsupported ops to CPU — small perf hit, no correctness
+# impact.  Must be set before the first torch import.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
 import torch as _torch_init
 
 if _torch_init.cuda.is_available():
