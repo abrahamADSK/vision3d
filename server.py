@@ -472,7 +472,7 @@ def _get_available_models():
     return available
 
 
-def _get_shape_pipeline(model_name: str = "full" if DEVICE == "mps" else "turbo"):
+def _get_shape_pipeline(model_name: str = "fast" if DEVICE == "mps" else "turbo"):
     """Load shape pipeline by model name. Swaps models if a different one is requested."""
     import torch
     global _shape_pipeline, _shape_pipeline_name
@@ -1836,7 +1836,7 @@ async def get_models():
     if _is_remote():
         return await _proxy_get("/api/models")
     available = _get_available_models()
-    default = "full" if DEVICE == "mps" else "turbo"
+    default = "fast" if DEVICE == "mps" else "turbo"
     return {
         "models": available,
         "default": default if default in available else (available[0] if available else default),
