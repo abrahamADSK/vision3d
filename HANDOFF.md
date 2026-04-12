@@ -95,7 +95,7 @@ vision3d es el **backend GPU** de maya-mcp. No hay dependencia de código compar
 | Archivo | Estado |
 |---|---|
 | LICENSE | ✅ MIT (created in Chat 35, 2026-04-12) |
-| NOTICE.md | ⏸ Pending — not yet created |
+| NOTICE.md | ✅ Created in Chat 35 (2026-04-12) — covers Hunyuan3D-2, SDXL Turbo, PyMeshLab GPL, trademarks |
 | README.md | ✅ With WARNING disclaimer |
 | CLAUDE.md | ✅ Audited against `server.py` (commit `844d6b0`, Chat 35) |
 

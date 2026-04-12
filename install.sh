@@ -225,9 +225,56 @@ run_install() {
     # Upgrade pip silently first
     "${VENV_PIP}" install --quiet --upgrade pip
 
-    # ── STEP 5 — Install requirements.txt ────────────────────────────────────
-    info "Step 5/9 — Installing dependencies from requirements.txt..."
+    # ── STEP 5 — Install PyTorch (platform-specific) + requirements.txt ──────
+    info "Step 5/9 — Installing PyTorch and base dependencies..."
 
+    # 5a. PyTorch must be installed FIRST with a platform-specific index.
+    # requirements.txt intentionally omits torch because a single pinned
+    # version cannot satisfy both CUDA 12.4 (needs +cu124 wheel from
+    # download.pytorch.org) and macOS MPS (needs the vanilla PyPI wheel).
+    # Transitive installation via diffusers/transformers would fetch
+    # whatever torch happens to satisfy the version range — not reliable.
+    local TORCH_TARGET="2.6.0"
+    local TORCH_CURRENT
+    TORCH_CURRENT=$("${VENV_PYTHON}" -c "import torch; print(torch.__version__)" 2>/dev/null || echo "")
+
+    local TORCH_EXPECTED
+    if [[ "$PLATFORM" == "cuda" ]]; then
+        TORCH_EXPECTED="${TORCH_TARGET}+cu124"
+    else
+        TORCH_EXPECTED="${TORCH_TARGET}"
+    fi
+
+    if [[ "$TORCH_CURRENT" == "$TORCH_EXPECTED" ]]; then
+        success "torch ${TORCH_EXPECTED} already installed — skipping"
+        STEPS_OK+=("torch already at ${TORCH_EXPECTED}")
+    else
+        if [[ -n "$TORCH_CURRENT" ]]; then
+            info "Found torch ${TORCH_CURRENT}, target is ${TORCH_EXPECTED} — reinstalling"
+        else
+            info "Installing torch ${TORCH_EXPECTED}..."
+        fi
+        local TORCH_OK=0
+        if [[ "$PLATFORM" == "cuda" ]]; then
+            if "${VENV_PIP}" install --quiet "torch==${TORCH_TARGET}" \
+                --index-url "https://download.pytorch.org/whl/cu124"; then
+                TORCH_OK=1
+            fi
+        else
+            if "${VENV_PIP}" install --quiet "torch==${TORCH_TARGET}"; then
+                TORCH_OK=1
+            fi
+        fi
+        if (( TORCH_OK == 1 )); then
+            success "torch ${TORCH_EXPECTED} installed"
+            STEPS_OK+=("torch ${TORCH_EXPECTED} installed")
+        else
+            error "torch installation failed — Hunyuan3D-2 will not run"
+            STEPS_ERR+=("torch installation failed (${TORCH_EXPECTED})")
+        fi
+    fi
+
+    # 5b. Install the rest from requirements.txt (torch is already in place).
     if [[ ! -f "${REQUIREMENTS}" ]]; then
         error "requirements.txt not found at ${REQUIREMENTS}"
         STEPS_ERR+=("requirements.txt missing — dependencies not installed")

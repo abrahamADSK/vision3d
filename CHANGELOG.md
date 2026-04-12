@@ -11,6 +11,23 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+### Added
+- **`NOTICE.md`** — Third-party component attribution file. Documents the
+  non-permissive licenses that users must be aware of (Tencent Hunyuan
+  Community License for Hunyuan3D-2, Stability AI Non-Commercial for SDXL
+  Turbo, GPL-3.0 for PyMeshLab) and lists permissive components with
+  upstream pointers. Not legal advice, but prevents accidental commercial
+  misuse by downstream users.
+- **Explicit PyTorch installation in `install.sh` (Step 5a)**. The script
+  now installs `torch==2.6.0` with a platform-specific index — the
+  `+cu124` wheel from `download.pytorch.org` for CUDA, the vanilla PyPI
+  wheel for macOS/MPS/CPU — **before** installing `requirements.txt`.
+  Idempotent: skips the install when the target version is already
+  present. Previously `torch` was pulled transitively by `diffusers`,
+  which did not guarantee the 2.6.0 version or the correct CUDA wheel on
+  a fresh Linux install. `requirements.txt` now has an explanatory
+  comment documenting why `torch` is intentionally absent from it.
+
 ### Changed
 - **MPS default shape model is now `fast`** (was `full`). On Apple Silicon
   the `full` model (18.8 GB) is rarely available locally; `fast` (4.93 GB)

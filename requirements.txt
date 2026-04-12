@@ -1,5 +1,10 @@
 # Vision3D — API server dependencies
 # (Hunyuan3D-2 and its dependencies are installed separately via pip install -e)
+#
+# NOTE: torch is intentionally NOT listed here. It is installed by
+# install.sh (Step 5a) with a platform-specific index — the +cu124 wheel
+# for Linux/CUDA, the vanilla PyPI wheel for macOS/MPS/CPU. Listing torch
+# here would force the wrong wheel on one of the two platforms.
 
 # ── Web server ──
 fastapi>=0.115.0
