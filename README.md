@@ -251,12 +251,12 @@ Browser / MCP client / curl
 | Model | Type | CUDA | MPS | Notes |
 |-------|------|------|-----|-------|
 | `hunyuan3d-dit-v2-0-turbo` | Shape | Yes | No | Requires `ConsistencyFlowMatchEulerDiscreteScheduler` (missing in Mac fork) |
-| `hunyuan3d-dit-v2-0-fast` | Shape | Yes | Yes | Requires `PYTORCH_ENABLE_MPS_FALLBACK=1` (set automatically by `server.py`) |
-| `hunyuan3d-dit-v2-0` (full) | Shape | Yes | Yes | Default on MPS |
+| `hunyuan3d-dit-v2-0-fast` | Shape | Yes | Yes | **Default on MPS** (4.93 GB). Requires `PYTORCH_ENABLE_MPS_FALLBACK=1` (set automatically by `server.py`) |
+| `hunyuan3d-dit-v2-0` (full) | Shape | Yes | Yes | 18.8 GB — not downloaded by default on Mac |
 | `hunyuan3d-paint-v2-0-turbo` | Paint | Yes | No | Needs fork changes for MPS |
 | `hunyuan3d-paint-v2-0` (normal) | Paint | Yes | Yes | Since v1.3.0 via hunyuan3d-mac fork |
 
-> **Note:** On Apple Silicon, `server.py` automatically selects `full` as the default shape model and the normal paint model. The turbo variants require scheduler/fork changes not yet available on MPS.
+> **Note:** On Apple Silicon, `server.py` automatically selects `fast` as the default shape model and the normal paint model. The `full` model (18.8 GB) works on MPS but is not downloaded by default — pull it manually if you need maximum quality. The `turbo` variant requires scheduler/fork changes not yet available on MPS.
 
 ## Project Structure
 

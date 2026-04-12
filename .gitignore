@@ -4,15 +4,17 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.pytest_cache/
 
-# API key
+# Secrets and local config
 .api_key
+.env
 
 # Model weights (too large for git)
 hf_models/
 
-# Output files
-3d_output/
+# Generated job output
+output/
 
 # OS
 .DS_Store
@@ -21,3 +23,4 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+.claude/

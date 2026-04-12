@@ -12,6 +12,28 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 ## [Unreleased]
 
 ### Changed
+- **MPS default shape model is now `fast`** (was `full`). On Apple Silicon
+  the `full` model (18.8 GB) is rarely available locally; `fast` (4.93 GB)
+  is the only MPS-compatible shape model downloaded by default. Affects
+  `_get_shape_pipeline()`, `get_models()`, and the embedded Web UI fallback.
+  Re-applies the logic of `894b613` which was silently lost during the
+  Chat 34 rollback to `fdc11a8`.
+- **`install.sh` systemd unit now includes `--local` in `ExecStart`.**
+  Previously relied on `EOFError` fallback when the interactive prompt ran
+  without a TTY; the explicit flag eliminates a silent hang window at boot.
+- **Embedded Web UI fallback aligned with backend.** When the model list is
+  empty, the Web UI now falls back to `fast` on MPS (was `full`).
+
+### Fixed
+- **Root cause of texture paint hang on complex subjects identified and
+  removed**: `enable_flashvdm()` (Lightning Vecset Decoder, ICCV 2025)
+  produced degenerate topology (~570 verts / ~460k faces, 0.0012 verts/face
+  ratio) on non-trivial subjects such as multi-part or concave meshes,
+  choking the `custom_rasterizer` in the paint stage. FlashVDM was removed
+  from `server.py` during the rollback to `fdc11a8` and must not be
+  re-introduced without validating against a complex mesh.
+
+### Consolidated earlier this cycle
 - **Consolidated `install.sh` and `setup.sh` into a single entry point.**
   `install.sh` now handles both code installation and service registration.
   Flags: `--no-service` (install only), `--service-only` (register service

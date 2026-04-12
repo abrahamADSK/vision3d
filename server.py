@@ -2203,7 +2203,7 @@ async function loadModels() {
       });
       // If no models found, fallback based on device
       if (models.length === 0) {
-        const fallback = data.device === 'mps' ? 'full' : 'turbo';
+        const fallback = data.device === 'mps' ? 'fast' : 'turbo';
         sel.innerHTML = '<option value="' + fallback + '">' + fallback + '</option>';
       }
     });

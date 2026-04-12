@@ -616,7 +616,7 @@ Environment=GPU_MODELS_DIR=${MODELS_DIR}
 Environment=GPU_WORK_DIR=${WORK_DIR}
 Environment=GPU_VISION_DIR=${VISION_DIR}
 Environment=LD_LIBRARY_PATH=${TORCH_LIB}
-ExecStart=${VENV_PYTHON} ${VISION_DIR}/server.py --host ${HOST} --port ${PORT}
+ExecStart=${VENV_PYTHON} ${VISION_DIR}/server.py --host ${HOST} --port ${PORT} --local
 Restart=on-failure
 RestartSec=5
 

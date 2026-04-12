@@ -94,10 +94,10 @@ vision3d es el **backend GPU** de maya-mcp. No hay dependencia de código compar
 
 | Archivo | Estado |
 |---|---|
-| LICENSE | ✅ MIT |
-| NOTICE.md | ✅ Creado |
-| README.md | ✅ Con disclaimer WARNING |
-| CLAUDE.md | ✅ Auditado contra server.py (Phase 6) |
+| LICENSE | ✅ MIT (created in Chat 35, 2026-04-12) |
+| NOTICE.md | ⏸ Pending — not yet created |
+| README.md | ✅ With WARNING disclaimer |
+| CLAUDE.md | ✅ Audited against `server.py` (commit `844d6b0`, Chat 35) |
 
 ### Rutas hardcodeadas
 

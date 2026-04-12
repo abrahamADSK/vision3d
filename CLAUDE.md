@@ -1,7 +1,7 @@
 # Vision3D — Critical Context for Claude
 
-> **Last updated**: 2026-04-09 — v1.5.0: interactive backend selection (local MPS / remote CUDA proxy)
-> **Audited against**: `server.py` (~2440 lines, commit `f77b8e7`)
+> **Last updated**: 2026-04-12 — v1.5.1+ post-Chat-34 rollback: FlashVDM removed, MPS default shape model = `fast`
+> **Audited against**: `server.py` (~2510 lines, commit `844d6b0`)
 
 ---
 
