@@ -12,6 +12,9 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 ## [Unreleased]
 
 ### Added
+- **`install.sh --check` dry-run flag** that verifies Python version, platform,
+  and pip.conf without creating a venv, installing dependencies, or registering
+  a service. Useful for CI pre-merge checks to catch installation issues early.
 - **`NOTICE.md`** — Third-party component attribution file. Documents the
   non-permissive licenses that users must be aware of (Tencent Hunyuan
   Community License for Hunyuan3D-2, Stability AI Non-Commercial for SDXL
@@ -29,6 +32,22 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
   comment documenting why `torch` is intentionally absent from it.
 
 ### Changed
+- **`install.sh` now fails fast on critical dependency installation errors**
+  (torch, requirements.txt, Hunyuan3D-2 editable) instead of logging and
+  continuing, which previously led to cascading failures in later steps.
+  Exit code is now non-zero at the end of the script if any error was
+  recorded, so CI and automation can reliably detect failures.
+- **`install.sh` mesh extras split into critical and optional groups.**
+  Critical (`pymeshlab`, `xatlas` — required for texture baking) abort on
+  failure; optional (`pygltflib`, `opencv-python`, `einops`, `omegaconf`)
+  print warnings only.
+- **`install.sh` STEP 8 import verification is now resilient to Python
+  subprocess crashes**: captures the exit code explicitly and validates the
+  JSON output before parsing, aborting with a clear message instead of
+  failing opaquely.
+- **`install.sh` systemd registration now checks exit codes and shows error
+  summary before exiting on failure**, ensuring the user sees which step
+  failed even when `set -e` would normally suppress output.
 - **MPS default shape model is now `fast`** (was `full`). On Apple Silicon
   the `full` model (18.8 GB) is rarely available locally; `fast` (4.93 GB)
   is the only MPS-compatible shape model downloaded by default. Affects
