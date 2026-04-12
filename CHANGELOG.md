@@ -9,6 +9,24 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ---
 
+## [Unreleased]
+
+### Changed
+- **Consolidated `install.sh` and `setup.sh` into a single entry point.**
+  `install.sh` now handles both code installation and service registration.
+  Flags: `--no-service` (install only), `--service-only` (register service
+  only, assumes venv exists), `--uninstall` (remove the registered service,
+  keeps code), `--help`. Default behaviour (no flags) runs both phases in
+  order. The previous two-script design was easy to forget — `install.sh`
+  alone left the machine "installed but not running" as a silent partial
+  state. This change makes the happy path a single command.
+
+### Removed
+- `setup.sh` — merged into `install.sh`. Use `install.sh --service-only` for
+  the equivalent of the old `setup.sh` behaviour.
+
+---
+
 ## [v1.5.1] — 2026-04-09
 
 ### Changed

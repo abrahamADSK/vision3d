@@ -48,7 +48,11 @@ cd vision3d
 ### 2. Install
 
 ```bash
-bash install.sh
+bash install.sh                 # install code + register service (full setup, default)
+bash install.sh --no-service    # install code only (skip service registration)
+bash install.sh --service-only  # register service only (assumes venv exists)
+bash install.sh --uninstall     # remove the registered service (keeps code)
+bash install.sh --help          # print usage
 ```
 
 `install.sh` detects your platform (CUDA / MPS / CPU) automatically and handles:
@@ -57,6 +61,7 @@ bash install.sh
 - Finding and installing the correct Hunyuan3D-2 fork in editable mode
 - Installing mesh-processing extras (pymeshlab, xatlas, etc.)
 - Verifying all critical imports and torch backend
+- Registering vision3d as a system service (systemd on Linux, LaunchAgent on macOS)
 
 Safe to run multiple times (idempotent).
 
@@ -135,13 +140,19 @@ After an extensive debugging session, the following stack is confirmed working e
 
 **Texturing benchmark (M4 Pro, 48 GB unified memory)**: full image-to-textured-mesh pipeline 626 s end-to-end, peak memory 23.8 GB (49.5 % of unified RAM), zero NaN warnings, visual quality verified.
 
-### 4. (Optional) Install as systemd service
+### 4. Install as a service
+
+By default, `install.sh` also registers vision3d as a system service (systemd on Linux, LaunchAgent on macOS) so it starts on boot/login. If you ran `install.sh --no-service` earlier and want to add the service later:
 
 ```bash
-sudo bash setup.sh
+bash install.sh --service-only
 ```
 
-This creates a `vision3d.service` that starts on boot and generates an API key.
+To remove the service only (keeps code and venv):
+
+```bash
+bash install.sh --uninstall
+```
 
 ## API Endpoints
 
@@ -252,8 +263,7 @@ Browser / MCP client / curl
 ```
 vision3d/
 ├── server.py          # FastAPI server — all endpoints, pipelines, and web UI
-├── install.sh         # Automated installer (CUDA/MPS/CPU detection, venv, deps)
-├── setup.sh           # GPU deployment script (systemd service, API key)
+├── install.sh         # Unified installer + service manager (CUDA/MPS/CPU)
 ├── requirements.txt   # Python dependencies
 └── .env.example       # Environment variables template
 ```
