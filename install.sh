@@ -711,7 +711,7 @@ UNIT
     then
         error "Failed to write systemd unit (sudo denied or disk full?)"
         STEPS_ERR+=("systemd unit write failed — sudo denied or disk full?")
-        return 1
+        print_summary; exit 1
     fi
 
     success "Created ${SERVICE_FILE}"
@@ -719,13 +719,13 @@ UNIT
     if ! sudo systemctl daemon-reload; then
         error "systemctl daemon-reload failed"
         STEPS_ERR+=("systemctl daemon-reload failed")
-        return 1
+        print_summary; exit 1
     fi
 
     if ! sudo systemctl enable --now vision3d.service; then
         error "systemctl enable --now vision3d.service failed"
         STEPS_ERR+=("systemctl enable --now vision3d.service failed")
-        return 1
+        print_summary; exit 1
     fi
 
     success "systemd service enabled and started"
