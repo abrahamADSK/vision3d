@@ -13,6 +13,7 @@
 #   bash install.sh --no-service    # install code only (skip service registration)
 #   bash install.sh --service-only  # register service only (assumes venv exists)
 #   bash install.sh --uninstall     # remove the registered service (keeps code)
+#   bash install.sh --check         # dry-run: verify python+platform+pip.conf, no install
 #   bash install.sh --help          # print this help
 #
 # Install phase does:
@@ -111,6 +112,7 @@ PYTHON_BIN=""
 SKIP_INSTALL=0
 SKIP_SERVICE=0
 DO_UNINSTALL=0
+DO_CHECK=0
 
 print_help() {
     sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -121,6 +123,7 @@ while [[ $# -gt 0 ]]; do
         --no-service)    SKIP_SERVICE=1; shift ;;
         --service-only)  SKIP_INSTALL=1; shift ;;
         --uninstall)     DO_UNINSTALL=1; shift ;;
+        --check)         DO_CHECK=1; shift ;;
         -h|--help)       print_help; exit 0 ;;
         *)               error "Unknown option: $1"; echo "Run 'bash install.sh --help' for usage."; exit 2 ;;
     esac
@@ -271,6 +274,8 @@ run_install() {
         else
             error "torch installation failed — Hunyuan3D-2 will not run"
             STEPS_ERR+=("torch installation failed (${TORCH_EXPECTED})")
+            print_summary
+            exit 1
         fi
     fi
 
@@ -285,6 +290,8 @@ run_install() {
         else
             error "pip install -r requirements.txt failed"
             STEPS_ERR+=("requirements.txt installation failed — check pip output")
+            print_summary
+            exit 1
         fi
     fi
 
@@ -328,6 +335,8 @@ run_install() {
         else
             error "pip install -e ${HY3D_DIR} failed"
             STEPS_ERR+=("Hunyuan3D-2 fork installation failed")
+            print_summary
+            exit 1
         fi
     else
         warn "${FORK_LABEL} not found in search paths:"
@@ -341,20 +350,33 @@ run_install() {
     # ── STEP 7 — Install mesh-processing extras ──────────────────────────────
     info "Step 7/9 — Installing mesh-processing extras..."
 
-    local MESH_EXTRAS=(pymeshlab xatlas pygltflib opencv-python einops omegaconf)
+    local CRITICAL_MESH_EXTRAS=(pymeshlab xatlas)
+    local OPTIONAL_MESH_EXTRAS=(pygltflib opencv-python einops omegaconf)
 
-    if "${VENV_PIP}" install --quiet "${MESH_EXTRAS[@]}"; then
-        success "Mesh extras installed: ${MESH_EXTRAS[*]}"
-        STEPS_OK+=("Mesh extras installed (${#MESH_EXTRAS[@]} packages)")
+    if "${VENV_PIP}" install --quiet "${CRITICAL_MESH_EXTRAS[@]}"; then
+        success "Critical mesh extras installed: ${CRITICAL_MESH_EXTRAS[*]}"
+        STEPS_OK+=("Critical mesh extras installed (pymeshlab, xatlas)")
     else
-        warn "Some mesh extras failed to install — non-fatal but some features may be limited"
-        STEPS_WARN+=("Mesh extras partially failed — check pip output")
+        error "Critical mesh extras failed to install — texture baking will not work"
+        STEPS_ERR+=("Critical mesh extras failed (pymeshlab/xatlas) — check pip output")
+        print_summary
+        exit 1
+    fi
+
+    if "${VENV_PIP}" install --quiet "${OPTIONAL_MESH_EXTRAS[@]}"; then
+        success "Optional mesh extras installed: ${OPTIONAL_MESH_EXTRAS[*]}"
+        STEPS_OK+=("Optional mesh extras installed (pygltflib, opencv-python, einops, omegaconf)")
+    else
+        warn "Some optional mesh extras failed to install — non-fatal but some features may be limited"
+        STEPS_WARN+=("Optional mesh extras partially failed (pygltflib/opencv-python/einops/omegaconf) — check pip output")
     fi
 
     # ── STEP 8 — Verify critical imports ─────────────────────────────────────
     info "Step 8/9 — Verifying imports..."
 
     local IMPORT_RESULTS
+    local import_rc
+    set +e
     IMPORT_RESULTS=$("${VENV_PYTHON}" - <<'PYEOF'
 import json, sys
 
@@ -408,6 +430,22 @@ except Exception as e:
 json.dump(results, sys.stdout)
 PYEOF
 )
+    import_rc=$?
+    set -e
+
+    if [[ $import_rc -ne 0 ]]; then
+        error "STEP 8 — Python import verification process exited with code ${import_rc}"
+        STEPS_ERR+=("Import verification failed — Python process crashed (exit code ${import_rc})")
+        print_summary
+        exit 1
+    fi
+
+    if ! echo "$IMPORT_RESULTS" | "${VENV_PYTHON}" -c "import json,sys; json.load(sys.stdin)" 2>/dev/null; then
+        error "STEP 8 returned invalid JSON — import verification output is corrupt"
+        STEPS_ERR+=("Import verification returned invalid JSON")
+        print_summary
+        exit 1
+    fi
 
     local IMPORT_SUMMARY
     IMPORT_SUMMARY=$(echo "$IMPORT_RESULTS" | "${VENV_PYTHON}" -c "
@@ -649,7 +687,7 @@ register_systemd() {
     local TORCH_LIB
     TORCH_LIB=$("${VENV_PYTHON}" -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))" 2>/dev/null || echo "")
 
-    sudo tee "$SERVICE_FILE" > /dev/null <<UNIT
+    if ! sudo tee "$SERVICE_FILE" > /dev/null <<UNIT
 [Unit]
 Description=Vision3D — AI 3D Generation Server
 After=network.target
@@ -670,11 +708,25 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 UNIT
+    then
+        error "Failed to write systemd unit (sudo denied or disk full?)"
+        STEPS_ERR+=("systemd unit write failed — sudo denied or disk full?")
+        return 1
+    fi
 
     success "Created ${SERVICE_FILE}"
 
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now vision3d.service
+    if ! sudo systemctl daemon-reload; then
+        error "systemctl daemon-reload failed"
+        STEPS_ERR+=("systemctl daemon-reload failed")
+        return 1
+    fi
+
+    if ! sudo systemctl enable --now vision3d.service; then
+        error "systemctl enable --now vision3d.service failed"
+        STEPS_ERR+=("systemctl enable --now vision3d.service failed")
+        return 1
+    fi
 
     success "systemd service enabled and started"
     STEPS_OK+=("systemd service created and started")
@@ -686,6 +738,83 @@ UNIT
     else
         warn "Server not responding yet — check: sudo journalctl -u vision3d -f"
         STEPS_WARN+=("Health check failed — server may still be starting")
+    fi
+}
+
+# =============================================================================
+# run_check — dry-run: verifies python, platform, and pip.conf only
+# Runs steps 1-3 without creating a venv or installing anything.
+# =============================================================================
+run_check() {
+    echo ""
+    hr
+    echo -e "${BOLD}  vision3d — pre-flight check (dry-run)${RESET}"
+    hr
+    echo ""
+    info "Repo root : ${REPO_ROOT}"
+    echo ""
+
+    # ── STEP 1 — Verify Python 3.10+ ──────────────────────────────────────────
+    info "Step 1/3 — Checking Python version..."
+
+    PYTHON_BIN=""
+    for candidate in python3 python; do
+        if command -v "$candidate" &>/dev/null; then
+            local ver_ok
+            ver_ok=$("$candidate" -c "import sys; print('ok' if sys.version_info >= (3, 10) else 'no')")
+            if [[ "$ver_ok" == "ok" ]]; then
+                PYTHON_BIN="$candidate"
+                break
+            fi
+        fi
+    done
+
+    if [[ -z "$PYTHON_BIN" ]]; then
+        error "Python 3.10 or newer is required but was not found."
+        STEPS_ERR+=("Python 3.10+ not found")
+        return
+    fi
+
+    local PY_VERSION
+    PY_VERSION=$("$PYTHON_BIN" --version 2>&1)
+    success "Found ${PY_VERSION} at $(command -v "$PYTHON_BIN")"
+    STEPS_OK+=("Python version check passed (${PY_VERSION})")
+
+    # ── STEP 2 — Detect platform ──────────────────────────────────────────────
+    info "Step 2/3 — Detecting platform..."
+
+    PLATFORM="cpu"
+
+    if [[ "$(uname)" == "Linux" ]] && command -v nvidia-smi &>/dev/null; then
+        local GPU_NAME
+        GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+        if [[ -n "$GPU_NAME" ]]; then
+            PLATFORM="cuda"
+            success "CUDA platform detected — ${GPU_NAME}"
+            STEPS_OK+=("Platform: CUDA (${GPU_NAME})")
+        fi
+    elif [[ "$(uname)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
+        PLATFORM="mps"
+        success "MPS platform detected — macOS arm64 (Apple Silicon)"
+        STEPS_OK+=("Platform: MPS (macOS arm64)")
+    fi
+
+    if [[ "$PLATFORM" == "cpu" ]]; then
+        warn "No GPU detected — would fall back to CPU"
+        STEPS_WARN+=("Platform: CPU only — no CUDA or MPS detected")
+    fi
+
+    # ── STEP 3 — Check pip.conf ───────────────────────────────────────────────
+    info "Step 3/3 — Checking pip.conf..."
+
+    local PIP_CONF="${HOME}/.config/pip/pip.conf"
+
+    if [[ -f "$PIP_CONF" ]] && grep -q "^user.*=.*true" "$PIP_CONF" 2>/dev/null; then
+        warn "Found 'user = true' in ${PIP_CONF} — this would be commented out on full install"
+        STEPS_WARN+=("pip.conf has 'user = true' — will be fixed on real install")
+    else
+        success "pip.conf OK (no 'user = true' conflict)"
+        STEPS_OK+=("pip.conf OK")
     fi
 }
 
@@ -832,6 +961,12 @@ if [[ $DO_UNINSTALL -eq 1 ]]; then
     exit 0
 fi
 
+if [[ $DO_CHECK -eq 1 ]]; then
+    run_check
+    print_summary
+    exit 0
+fi
+
 if [[ $SKIP_INSTALL -eq 0 ]]; then
     run_install
 fi
@@ -841,3 +976,7 @@ if [[ $SKIP_SERVICE -eq 0 ]]; then
 fi
 
 print_summary
+
+if [[ ${#STEPS_ERR[@]} -gt 0 ]]; then
+    exit 1
+fi
