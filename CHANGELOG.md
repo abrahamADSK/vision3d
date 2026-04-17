@@ -11,7 +11,25 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+## [v1.6.0] — 2026-04-17
+
 ### Added
+- **Cross-cutting concept registry** (`.concepts.yml`) with 10 machine-
+  checkable invariants protecting the public REST surface, stable preset
+  and shape-model names, timing-safe API-key validation, retired-concept
+  absence (FlashVDM, attention_slicing, PAINT_MAX_FACES), single-install-
+  script rule, and release cadence.
+- **`scripts/verify_concepts.py` + `scripts/invariant_types.py`** — the
+  invariant engine (8 invariant types, 11 source types, stdlib + PyYAML
+  only). Shared surface with flame-mcp.
+- **`.pre-commit-config.yaml`** wiring `verify_concepts.py` to every
+  commit via the pre-commit framework. Soft-launch mode (`strict: false`)
+  for two weeks, then flip to strict.
+- **Release-cadence invariants** (ecosystem rule, Chat 44):
+  `commits_since_last_tag_under_threshold` (warn at 10, fail at 30 commits
+  past last tag; fail if tag > 30 days old with pending work) and
+  `changelog_sections_match_tags` (bidirectional between CHANGELOG version
+  headings and git tags).
 - **`install.sh --check` dry-run flag** that verifies Python version, platform,
   and pip.conf without creating a venv, installing dependencies, or registering
   a service. Useful for CI pre-merge checks to catch installation issues early.
