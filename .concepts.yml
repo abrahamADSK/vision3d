@@ -1,0 +1,158 @@
+# Cross-cutting concept registry for vision3d.
+#
+# vision3d is a FastAPI HTTP server (no MCP protocol, no stdio transport).
+# Its invariants protect the public REST surface, the stable preset/model
+# names consumed by maya-mcp, and the architectural guardrails carried
+# over from Chat 31–34 (no FlashVDM, no PAINT_MAX_FACES, no attention_slicing).
+#
+# All invariants pass against HEAD (Chat 44 audit: "no critical drifts").
+# Soft-launch is active anyway for two weeks in case an invariant is itself
+# buggy; flip to `strict: true` when stable.
+
+schema_version: 1
+repo: vision3d
+strict: false
+
+concepts:
+
+  rest_endpoint_inventory:
+    description: >
+      The eleven public REST endpoints exposed by server.py. Path strings
+      are the contract that maya-mcp pins against; drift here silently
+      breaks the downstream client. The expected set is hardcoded in this
+      YAML intentionally — adding an endpoint forces a registry edit in
+      the same commit.
+    source_of_truth:
+      file: server.py
+      symbol: "@app.get / @app.post / @app.delete decorators"
+    mirrors:
+      - file: .concepts.yml
+        field: "endpoint_inventory_subset.a_source.values"
+      - file: CLAUDE.md
+        section: "REST API"
+        kind: prose_enumeration
+      - file: README.md
+        section: "HTTP API surface"
+        kind: prose_enumeration
+    invariants:
+      - id: endpoint_inventory_subset
+        type: subset
+        direction: bidirectional
+        a_source:
+          type: ast_decorator_args
+          file: server.py
+          decorators: [app.get, app.post, app.delete]
+          arg_index: 0
+        b_source:
+          type: literal_set
+          values:
+            - "/"
+            - /api/health
+            - /api/models
+            - /api/presets
+            - /api/generate-shape
+            - /api/generate-text
+            - /api/generate-full
+            - /api/texture-mesh
+            - /api/jobs/{job_id}
+            - /api/jobs/{job_id}/files/{filename}
+            - /api/jobs/{job_id}/stream
+
+  quality_presets_stable:
+    description: >
+      QUALITY_PRESETS dict exposes exactly four preset names. Client code
+      (maya-mcp, Web UI, README examples) hardcodes these; adding or
+      removing one is a breaking change that must be explicit.
+    source_of_truth:
+      file: server.py
+      symbol: QUALITY_PRESETS
+    invariants:
+      - id: preset_names_match_contract
+        type: subset
+        direction: bidirectional
+        a_source:
+          type: ast_dict_keys
+          file: server.py
+          symbol: QUALITY_PRESETS
+        b_source:
+          type: literal_set
+          values: [low, medium, high, ultra]
+
+  shape_models_stable:
+    description: >
+      SHAPE_MODELS dict names expose exactly three user-facing identifiers.
+      Runtime availability depends on weights on disk (checked separately by
+      _get_available_models), but the user-facing names are a stable contract.
+    source_of_truth:
+      file: server.py
+      symbol: SHAPE_MODELS
+    invariants:
+      - id: shape_model_names_match_contract
+        type: subset
+        direction: bidirectional
+        a_source:
+          type: ast_dict_keys
+          file: server.py
+          symbol: SHAPE_MODELS
+        b_source:
+          type: literal_set
+          values: [turbo, fast, full]
+
+  api_key_timing_safe:
+    description: >
+      Authentication uses `secrets.compare_digest` (timing-safe) and NEVER
+      plain `==`. The property was established at v1.0 and must not regress
+      (would open a timing side-channel on the API key).
+    source_of_truth:
+      file: server.py
+      symbol: _verify_api_key
+    invariants:
+      - id: compare_digest_present
+        type: claim_verifies
+        claim: "server.py uses secrets.compare_digest for API-key validation"
+        code_grep:
+          regex: 'secrets\.compare_digest'
+          file_pattern: server.py
+        expected: found
+
+  retired_concepts_absent:
+    description: >
+      Chat 31–34 removed several failed experiments. Any re-appearance in
+      code would be a regression. These patterns must stay absent.
+    invariants:
+      - id: flashvdm_absent
+        type: claim_verifies
+        claim: "FlashVDM removed in Chat 34 (degenerate topology; distrust memory)"
+        code_grep:
+          regex: 'FlashVDM|enable_flashvdm|flashvdm'
+          file_pattern: server.py
+        expected: not_found
+
+      - id: attention_slicing_absent
+        type: claim_verifies
+        claim: "attention_slicing was dead code since Chat 31"
+        code_grep:
+          regex: 'attention_slicing|enable_attention_slicing'
+          file_pattern: server.py
+        expected: not_found
+
+      - id: paint_max_faces_guard_absent
+        type: claim_verifies
+        claim: "PAINT_MAX_FACES guard reverted in Chat 32 (erroneous)"
+        code_grep:
+          regex: 'PAINT_MAX_FACES'
+          file_pattern: server.py
+        expected: not_found
+
+  single_install_script_at_root:
+    description: >
+      Ecosystem rule (Chat 34): each MCP-ecosystem repo has exactly one
+      install script at the repo root. vision3d is the repo where the rule
+      was first established; this invariant prevents regression.
+    invariants:
+      - id: one_install_script_at_root
+        type: glob_count
+        patterns:
+          - "install*.sh"
+          - "setup*.sh"
+        expected: 1

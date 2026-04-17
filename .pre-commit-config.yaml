@@ -1,0 +1,25 @@
+# Pre-commit hooks for vision3d.
+#
+# First-time setup on each clone (runs inside the repo venv):
+#   ./install.sh                  # creates .venv/ and installs deps
+#   .venv/bin/pip install pre-commit
+#   .venv/bin/pre-commit install
+#
+# Run manually across all files:
+#   .venv/bin/pre-commit run --all-files
+#
+# Bypass in an emergency (NOT recommended; logs the skip):
+#   git commit --no-verify
+#
+# See: https://pre-commit.com
+
+repos:
+  - repo: local
+    hooks:
+      - id: verify-concepts
+        name: Verify cross-cutting concepts
+        entry: .venv/bin/python scripts/verify_concepts.py
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+        always_run: true

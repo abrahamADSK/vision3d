@@ -1,7 +1,14 @@
 # Vision3D — Critical Context for Claude
 
-> **Last updated**: 2026-04-12 — v1.5.1+ post-Chat-34 rollback: FlashVDM removed, MPS default shape model = `fast`
-> **Audited against**: `server.py` (~2510 lines, commit `844d6b0`)
+> **Last updated**: 2026-04-17 — v1.5.1+; Chat 44 concept-registry rollout
+> **Audited against**: `server.py` (~2510 lines)
+>
+> **Concept registry active.** Before editing `server.py`, README, or
+> install.sh, read `.concepts.yml` at the repo root. The pre-commit hook
+> runs `scripts/verify_concepts.py` on every commit and blocks drift
+> between code and the declared invariants (8 active, all passing against
+> HEAD). Soft-launch mode (`strict: false`) for two weeks, then flip to
+> strict.
 
 ---
 
