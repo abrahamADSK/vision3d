@@ -195,6 +195,40 @@ concepts:
           - "setup*.sh"
         expected: 1
 
+  paint_pipeline_unload:
+    description: >
+      The paint pipeline (~14 GB VRAM) MUST have both an _unload_paint_pipeline()
+      function and an idle-timer that calls it after PAINT_IDLE_SECONDS of
+      inactivity. Without these, paint stays cached forever and holds VRAM
+      even when the server is idle — blocking sibling GPU services (Ollama,
+      ComfyUI) on the shared GPU. Regression prevention for the 7+ day VRAM
+      leak observed on glorfindel 2026-04.
+    source_of_truth:
+      file: server.py
+      symbol: "_unload_paint_pipeline + _paint_idle_loop"
+    invariants:
+      - id: unload_paint_pipeline_exists
+        type: claim_verifies
+        claim: "server.py defines _unload_paint_pipeline()"
+        code_grep:
+          regex: 'def _unload_paint_pipeline\('
+          file_pattern: 'server.py'
+        expected: found
+      - id: paint_idle_loop_exists
+        type: claim_verifies
+        claim: "server.py defines _paint_idle_loop() background task"
+        code_grep:
+          regex: 'async def _paint_idle_loop\('
+          file_pattern: 'server.py'
+        expected: found
+      - id: paint_idle_loop_registered_in_lifespan
+        type: claim_verifies
+        claim: "lifespan schedules _paint_idle_loop via asyncio.create_task"
+        code_grep:
+          regex: 'asyncio\.create_task\(_paint_idle_loop\(\)\)'
+          file_pattern: 'server.py'
+        expected: found
+
   github_release_per_tag:
     description: >
       Every git tag vX.Y.Z (v1.0.0+) must have a corresponding published GitHub

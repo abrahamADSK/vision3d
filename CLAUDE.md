@@ -147,7 +147,15 @@ pipeline(text="...", ...)   # Error: unsupported parameter
 - **Model**: `hunyuan3d-paint-v2-0-turbo` (~14 GB)
 - **Dependency**: requires `hunyuan3d-delight-v2-0` (~4 GB, relighting model — DO NOT delete)
 - Used in: `generate-full`, `generate-text`, `texture-mesh`
-- **NOT unloaded after use** (stays cached in `_paint_pipeline`)
+- **Idle-timer unload** (v1.6.2+): cached across requests for latency; a background
+  task (`_paint_idle_loop`) unloads it after `PAINT_IDLE_SECONDS` (default 900 s
+  = 15 min) of inactivity, protected by `_gpu_semaphore` so it never races an
+  in-flight job. The unload calls `.to("cpu")` + `del` + `gc.collect()` x2 +
+  `_clear_device_cache()` (which now also runs `torch.cuda.ipc_collect()`
+  so the VRAM actually returns to other processes, not just PyTorch's cache).
+  Overridable via env: `VISION3D_PAINT_IDLE_SECONDS`,
+  `VISION3D_PAINT_IDLE_CHECK_INTERVAL`. Clean shutdown (lifespan exit) also
+  unloads before returning.
 
 ### VRAM Management (CRITICAL — RTX 3090, 24 GB)
 GPU is shared. Models do NOT fit simultaneously:

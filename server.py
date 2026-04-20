@@ -86,10 +86,19 @@ del _torch_init  # avoid keeping a top-level torch reference
 
 
 def _clear_device_cache():
-    """Clear GPU/MPS memory cache (replaces direct torch.cuda.empty_cache calls)."""
+    """Clear GPU/MPS memory cache (replaces direct torch.cuda.empty_cache calls).
+
+    On CUDA, also runs ipc_collect() to release IPC-shared segments that
+    empty_cache() alone does not reclaim — required to actually return
+    VRAM to other processes (Ollama, ComfyUI) after a pipeline is unloaded.
+    """
     import torch
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass  # not all PyTorch builds expose ipc_collect
         torch.cuda.synchronize()
     elif DEVICE == "mps":
         torch.mps.empty_cache()
@@ -252,6 +261,14 @@ JOB_RUNNING_TTL = int(os.environ.get("GPU_JOB_RUNNING_TTL", "7200"))
 JOB_CLEANUP_INTERVAL = int(os.environ.get("GPU_JOB_CLEANUP_INTERVAL", "300"))
 MAX_JOBS = int(os.environ.get("GPU_MAX_JOBS", "100"))
 
+# Paint pipeline idle policy. The paint model is ~14 GB VRAM; historically it
+# stayed resident across requests to avoid ~5 s reload latency, but that hogged
+# VRAM indefinitely and blocked sibling GPU services (Ollama, ComfyUI) on the
+# shared RTX 3090. After PAINT_IDLE_SECONDS of no paint activity, a background
+# task unloads the pipeline and calls _clear_device_cache() to return the VRAM.
+PAINT_IDLE_SECONDS = int(os.environ.get("VISION3D_PAINT_IDLE_SECONDS", "900"))  # 15 min
+PAINT_IDLE_CHECK_INTERVAL = int(os.environ.get("VISION3D_PAINT_IDLE_CHECK_INTERVAL", "60"))
+
 
 def _delete_job_output(job: dict) -> bool:
     """Delete the on-disk output directory of a job, with safety checks.
@@ -316,6 +333,29 @@ async def _job_cleanup_loop():
                 print(f"[Vision3D] Cleaned {n_jobs} expired jobs ({n_dirs} output dirs deleted)")
         except Exception as exc:
             print(f"[Vision3D] Job cleanup loop error: {exc}")
+
+
+async def _paint_idle_loop():
+    """Background task that unloads the paint pipeline after PAINT_IDLE_SECONDS
+    of inactivity. Skips the unload while a GPU job is running (protected by
+    the same _gpu_semaphore the inference path acquires).
+    """
+    while True:
+        await asyncio.sleep(PAINT_IDLE_CHECK_INTERVAL)
+        try:
+            if _paint_pipeline is None or _paint_pipeline_last_use is None:
+                continue
+            if _gpu_semaphore.locked():
+                continue
+            idle = time.monotonic() - _paint_pipeline_last_use
+            if idle >= PAINT_IDLE_SECONDS:
+                print(
+                    f"[Paint] Idle for {idle:.0f}s >= {PAINT_IDLE_SECONDS}s — auto-unloading.",
+                    flush=True,
+                )
+                _unload_paint_pipeline()
+        except Exception as exc:
+            print(f"[Vision3D] Paint idle loop error: {exc}")
 
 
 def _check_max_jobs():
@@ -446,6 +486,9 @@ def _verify_api_key(
 _shape_pipeline = None
 _shape_pipeline_name = None
 _paint_pipeline = None
+# Monotonic timestamp of the most recent _get_paint_pipeline() access.
+# Drives the idle-gap auto-unload — see _paint_idle_loop().
+_paint_pipeline_last_use: float | None = None
 _t2i_pipeline = None
 
 # SDXL Turbo for text-to-image (required for text-to-3D)
@@ -632,7 +675,8 @@ def _paint_progress_scope(job_id: str):
 
 
 def _get_paint_pipeline():
-    global _paint_pipeline
+    global _paint_pipeline, _paint_pipeline_last_use
+    _paint_pipeline_last_use = time.monotonic()
     if _paint_pipeline is None:
         try:
             from hy3dgen.texgen.pipelines import Hunyuan3DPaintPipeline
@@ -662,6 +706,36 @@ def _get_paint_pipeline():
             traceback.print_exc()
             return None
     return _paint_pipeline
+
+
+def _unload_paint_pipeline():
+    """Fully unload paint model from GPU to free VRAM.
+
+    Triggered by _paint_idle_loop() after PAINT_IDLE_SECONDS of inactivity, or
+    explicitly on shutdown. Mirrors the shape/t2i unload pattern with the same
+    gc.collect() x2 + _clear_device_cache() sequence, which now also runs
+    ipc_collect() to actually return the VRAM to other processes.
+    """
+    import gc
+    import torch
+    global _paint_pipeline, _paint_pipeline_last_use
+
+    if _paint_pipeline is None:
+        return
+
+    print("[Paint] Unloading paint pipeline to free VRAM...", flush=True)
+    try:
+        _paint_pipeline.to("cpu")
+    except Exception:
+        # Some wrappers don't expose .to() cleanly; proceed with del anyway.
+        pass
+    del _paint_pipeline
+    _paint_pipeline = None
+    _paint_pipeline_last_use = None
+    gc.collect()
+    gc.collect()
+    _clear_device_cache()
+    print("[Paint] VRAM freed.", flush=True)
 
 
 def _load_t2i_pipeline():
@@ -1435,8 +1509,21 @@ async def lifespan(app: FastAPI):
         f"TTL completed={JOB_TTL_SECONDS}s running={JOB_RUNNING_TTL}s | "
         f"max {MAX_JOBS} jobs | output dirs deleted on expiry"
     )
+    # Start paint-idle unload task (v1.6.2 — VRAM leak fix)
+    paint_idle_task = asyncio.create_task(_paint_idle_loop())
+    print(
+        f"[Vision3D] Paint idle unload: check every {PAINT_IDLE_CHECK_INTERVAL}s | "
+        f"unload after {PAINT_IDLE_SECONDS}s of inactivity"
+    )
+    if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF"):
+        print(
+            "[Vision3D] Tip: set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
+            "in the systemd unit to reduce allocator fragmentation across reloads."
+        )
     yield
     cleanup_task.cancel()  # Stop cleanup on shutdown
+    paint_idle_task.cancel()
+    _unload_paint_pipeline()  # release VRAM on clean shutdown
 
 
 app = FastAPI(
