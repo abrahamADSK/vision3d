@@ -18,6 +18,14 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
   `changelog_tag_sync` release-in-progress tolerance.
 
 ### Added
+- `scripts/verify_concepts.py --write` — WRITER MODE (Chat 46). Requires
+  the triple flag `--accept-current-as-truth --i-reviewed-diff --write`.
+  Dispatches to per-type writers in `invariant_types.py::WRITERS`.
+  Currently supports `tool_count` (updates integers inside
+  `<!-- concept:<id> start/end -->` blocks) and `review_expiry` (bumps
+  `reviewed_at` timestamps to today). Other invariant types report
+  `WRITER UNSUPPORTED`. No auto-commit — user reviews `git diff` before
+  committing. Closes Chat 45 P3.15 deferral.
 - `scripts/cut-release.sh` — ecosystem-shared release orchestrator. Validates
   clean tree + semver arg + non-empty `[Unreleased]`, edits CHANGELOG +
   `VERSION` (vision3d has no `pyproject.toml`; the `VERSION` file is the
