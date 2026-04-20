@@ -11,6 +11,11 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+### Fixed
+- `install.sh` — replaced two unused-counter `for i in 1..5` loops with
+  `for _ in 1..5` to silence shellcheck SC2034. Zero behaviour change
+  (ecosystem shellcheck sweep Chat 46).
+
 ### Changed
 - `.concepts.yml` — `strict: false → true`. The pre-commit hook now blocks
   commits on any unresolved invariant drift instead of only reporting it.

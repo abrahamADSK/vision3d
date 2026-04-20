@@ -639,8 +639,7 @@ PLIST
     if launchctl print "gui/$(id -u)/${PLIST_LABEL}" &>/dev/null; then
         info "Service already loaded — reloading..."
         launchctl bootout "gui/$(id -u)/${PLIST_LABEL}" 2>/dev/null || true
-        local i
-        for i in 1 2 3 4 5; do
+        for _ in 1 2 3 4 5; do
             if ! launchctl print "gui/$(id -u)/${PLIST_LABEL}" &>/dev/null; then
                 break
             fi
@@ -659,8 +658,7 @@ PLIST
 
     info "Waiting for server to start..."
     local HEALTH_OK=false
-    local i
-    for i in 1 2 3 4 5; do
+    for _ in 1 2 3 4 5; do
         sleep 2
         if curl -sf "http://${HOST}:${PORT}/api/health" > /dev/null 2>&1; then
             HEALTH_OK=true
