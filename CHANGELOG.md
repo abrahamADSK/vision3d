@@ -11,6 +11,22 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+## [v1.6.1] — 2026-04-20
+
+### Added
+- `.concepts.yml` — `github_release_per_tag` concept with the
+  `every_v1plus_tag_has_github_release` invariant. Enforces that every
+  `vX.Y.Z` tag (v1.0.0+) has a matching published GitHub Release;
+  `gh release list` is the oracle. Pre-1.0 tags excluded (pre-release
+  noise). Ecosystem-wide policy introduced in Chat 45. Backfilled
+  GitHub Releases for the three historical tags (`v1.0.0`, `v1.1.0`,
+  `v1.2.0`) that were missing one.
+- `scripts/invariant_types.py` + `scripts/verify_concepts.py` — synced
+  to the ecosystem-canonical version from Chat 45 (additive extensions:
+  `ast_decorator_functions.name_kwarg`, `ast_enum_values`,
+  `ast_decorator_kwarg` back-compat alias). Byte-identical with
+  flame-mcp, maya-mcp, fpt-mcp.
+
 ## [v1.6.0] — 2026-04-17
 
 ### Added
