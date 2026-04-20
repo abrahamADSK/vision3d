@@ -496,7 +496,9 @@ _shape_pipeline_name = None
 _paint_pipeline = None
 # Monotonic timestamp of the most recent _get_paint_pipeline() access.
 # Drives the idle-gap auto-unload — see _paint_idle_loop().
-_paint_pipeline_last_use: float | None = None
+# NOTE: Optional[float] (not `float | None`) because glorfindel runs Python 3.9;
+# PEP 604 union syntax is Python 3.10+.
+_paint_pipeline_last_use: Optional[float] = None
 _t2i_pipeline = None
 
 # SDXL Turbo for text-to-image (required for text-to-3D)

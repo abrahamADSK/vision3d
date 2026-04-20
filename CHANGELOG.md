@@ -11,6 +11,16 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+## [v1.6.4] — 2026-04-20
+
+### Fixed
+- Python 3.9 compatibility — the `_paint_pipeline_last_use: float | None`
+  annotation added in v1.6.2 used PEP 604 union syntax (Python 3.10+),
+  which crashed glorfindel (Rocky Linux 9 ships Python 3.9) with
+  `TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'`
+  at module load. Replaced with `Optional[float]` (already imported in
+  this file) so v1.6.2's paint-unload code actually deploys on glorfindel.
+
 ## [v1.6.3] — 2026-04-20
 
 ### Added
