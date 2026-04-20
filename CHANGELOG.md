@@ -11,6 +11,29 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+### Added
+- `scripts/cut-release.sh` — ecosystem-shared release orchestrator. Validates
+  clean tree + semver arg + non-empty `[Unreleased]`, edits CHANGELOG +
+  `VERSION` (vision3d has no `pyproject.toml`; the `VERSION` file is the
+  release anchor), commits with `CUT_RELEASE_VERSION=X.Y.Z` so the
+  `changelog_tag_sync` invariant tolerates the transient pre-commit drift,
+  then tags, pushes, and creates a GitHub release with the CHANGELOG
+  section as notes. Ships with `--dry-run` for safe previews. Byte-identical
+  across the 4 MCP-ecosystem repos; canonical at
+  `~/Projects/cut-release-canonical.sh`. Resolves the Chat 45 P1 release-flow
+  tension that was blocking the ecosystem-wide `strict: true` flip.
+- `VERSION` — plain-text version anchor (`1.6.4`) read by
+  `scripts/verify_concepts.py` and bumped by `scripts/cut-release.sh`.
+  vision3d has no `pyproject.toml`, so a dedicated anchor file is the
+  simplest way to make the `changelog_tag_sync` tolerance work. Content is
+  a single line of `X.Y.Z`.
+- `scripts/invariant_types.py` — new `changelog_tag_sync` handler replaces
+  the previous `subset`-based `changelog_tag_coherence` invariant. Adds
+  release-in-progress tolerance anchored to env `CUT_RELEASE_VERSION` (set
+  by `cut-release.sh` at commit time) OR the `VERSION` file content. The
+  tolerance only fires for exactly one drifting version that matches the
+  anchor — cannot be forged without bumping the real anchor.
+
 ## [v1.6.4] — 2026-04-20
 
 ### Fixed
