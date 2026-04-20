@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # glorfindel (deploy target) runs Python 3.9, so the lower bound is
+        # 3.9 — NOT 3.10 like the other ecosystem repos. Chat 45 lesson:
+        # `float | None` (PEP 604) crashed on the real host because Mac-side
+        # pytest was only on 3.10+.
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install minimal test deps
+        run: |
+          # Heavy runtime deps (torch, diffusers, trimesh, hy3dgen, rembg,
+          # pyfqmr, pillow, psutil) are mocked in tests/conftest.py via
+          # MagicMock. Only install the web-server stack + pytest.
+          python -m pip install --upgrade pip
+          pip install fastapi "uvicorn[standard]" python-multipart \
+                      sse-starlette httpx
+          pip install pytest pyyaml
+
+      - name: Run tests
+        run: |
+          python -m pytest tests/ -p no:warnings
+
+  lint:
+    name: lint (ruff — non-blocking in v1)
+    runs-on: ubuntu-latest
+    continue-on-error: true  # v1: baseline has existing lint debt; flip to false once cleaned up
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff check
+        run: ruff check server.py tests/ --output-format=github
+
+  concepts:
+    name: verify_concepts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install pyyaml + gh (for github_release_per_tag invariant)
+        run: |
+          pip install pyyaml
+          sudo apt-get update && sudo apt-get install -y gh
+
+      - name: Run verify_concepts.py
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/verify_concepts.py

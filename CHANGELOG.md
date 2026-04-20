@@ -11,6 +11,19 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+### Added
+- `.github/workflows/ci.yml` — GitHub Actions CI workflow. Three jobs:
+  pytest (3.9/3.10/3.11/3.12 matrix — glorfindel runs 3.9, so lower bound
+  is tighter than other ecosystem repos per Chat 45 PEP 604 lesson),
+  ruff lint (non-blocking in v1), verify_concepts on every push + PR.
+  Heavy runtime deps (torch, diffusers, trimesh, etc.) are mocked via
+  `tests/conftest.py`, so CI only installs the FastAPI stack. Closes
+  Chat 45 P3 CI item.
+- `.github/workflows/pr-review.yml` — automated Claude PR review
+  (`anthropics/claude-code-action@v1`). Byte-identical across the 4
+  ecosystem repos. Requires repo secret `ANTHROPIC_API_KEY`. Closes
+  Chat 45 P3 PR-review item.
+
 ### Fixed
 - `install.sh` — replaced two unused-counter `for i in 1..5` loops with
   `for _ in 1..5` to silence shellcheck SC2034. Zero behaviour change
