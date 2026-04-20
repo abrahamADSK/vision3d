@@ -11,7 +11,33 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+## [v1.6.2] — 2026-04-20
+
+### Fixed
+- **VRAM leak on idle** — the paint pipeline (~14 GB) stayed cached across
+  requests with no release path, so VRAM remained held for days even when
+  no jobs were running. On glorfindel this blocked sibling GPU services
+  (Ollama, ComfyUI) on the shared 24 GB RTX 3090. Added
+  `_unload_paint_pipeline()` mirroring the shape/t2i unload pattern, plus a
+  background task `_paint_idle_loop()` that auto-unloads after
+  `PAINT_IDLE_SECONDS` of inactivity (default 900 s = 15 min, overridable
+  via env). Protected by `_gpu_semaphore` so the unload never races an
+  in-flight job. Lifespan also unloads on clean shutdown.
+- `_clear_device_cache()` now calls `torch.cuda.ipc_collect()` in addition
+  to `empty_cache()` — without this, VRAM cached inside PyTorch's IPC
+  segments was not actually returned to the CUDA driver. `ipc_collect` is
+  wrapped in try/except because not every PyTorch build exposes it.
+
 ### Added
+- Startup log hints that `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+  be set in the systemd unit to reduce allocator fragmentation across
+  load/unload cycles. Not auto-set — operator decision.
+- `.concepts.yml` — new `paint_pipeline_unload` concept with three
+  `claim_verifies` invariants guarding the unload function, the idle loop,
+  and the lifespan registration. Prevents silent regression of the VRAM fix.
+- 5 new unit tests in `tests/test_server.py` (TestPaintUnload) covering
+  no-op on unloaded state, state clear on loaded, tolerance of pipelines
+  that don't implement `.to()`, constants sanity, and env override.
 - `scripts/verify_concepts.py` — `--accept-current-as-truth` + `--i-reviewed-diff` double-flag escape hatch (REPORT MODE ONLY). When both flags are passed, the runner inspects every failing invariant and prints a human-readable "would update \<mirror\>" line describing what a hypothetical writer mode would change, then exits 0 without touching any file. Single-flag usage is rejected with exit code 2 by design — the double-flag requirement prevents accidental drift acceptance. Intended for repos that drifted while dormant and need a one-shot review before flipping `strict: true`. Writer mode is deferred to a future pass with explicit user sign-off. Chat 44 ultraplan Q5.
 
 ## [v1.6.1] — 2026-04-20

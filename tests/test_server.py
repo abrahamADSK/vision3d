@@ -266,3 +266,75 @@ class TestAuthentication:
         assert response.status_code != 401
         # Should be 200 (streaming) since the job exists
         assert response.status_code == 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAINT UNLOAD TESTS (v1.6.2 — VRAM leak fix)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPaintUnload:
+    """Tests for _unload_paint_pipeline() and the idle-timer state machine.
+
+    The real paint pipeline is a ~14 GB CUDA model; these tests substitute a
+    lightweight stand-in so the unload logic (not the model) is what gets
+    exercised.
+    """
+
+    def setup_method(self):
+        """Save and clear paint module state before each test."""
+        self._saved_pipeline = server._paint_pipeline
+        self._saved_last_use = server._paint_pipeline_last_use
+        server._paint_pipeline = None
+        server._paint_pipeline_last_use = None
+
+    def teardown_method(self):
+        """Restore paint module state."""
+        server._paint_pipeline = self._saved_pipeline
+        server._paint_pipeline_last_use = self._saved_last_use
+
+    def test_unload_is_noop_when_paint_is_none(self):
+        """Test 22: unload is a safe no-op when paint pipeline is not loaded."""
+        assert server._paint_pipeline is None
+        server._unload_paint_pipeline()
+        assert server._paint_pipeline is None
+        assert server._paint_pipeline_last_use is None
+
+    def test_unload_clears_state_when_loaded(self):
+        """Test 23: unload clears both _paint_pipeline and _paint_pipeline_last_use."""
+        class _FakePipeline:
+            def to(self, device):
+                self.moved_to = device
+                return self
+        server._paint_pipeline = _FakePipeline()
+        server._paint_pipeline_last_use = time.monotonic()
+        server._unload_paint_pipeline()
+        assert server._paint_pipeline is None
+        assert server._paint_pipeline_last_use is None
+
+    def test_unload_tolerates_pipelines_without_to_method(self):
+        """Test 24: unload does not raise when .to('cpu') fails."""
+        class _Bad:
+            def to(self, device):
+                raise RuntimeError("no .to() support")
+        server._paint_pipeline = _Bad()
+        server._paint_pipeline_last_use = time.monotonic()
+        server._unload_paint_pipeline()
+        assert server._paint_pipeline is None
+
+    def test_paint_idle_constants_positive(self):
+        """Test 25: idle threshold + check interval are sane (> 0)."""
+        assert server.PAINT_IDLE_SECONDS > 0
+        assert server.PAINT_IDLE_CHECK_INTERVAL > 0
+        assert server.PAINT_IDLE_SECONDS >= server.PAINT_IDLE_CHECK_INTERVAL
+
+    def test_paint_idle_env_override(self, monkeypatch):
+        """Test 26: PAINT_IDLE_SECONDS honours VISION3D_PAINT_IDLE_SECONDS env."""
+        monkeypatch.setenv("VISION3D_PAINT_IDLE_SECONDS", "42")
+        import importlib
+        reloaded = importlib.reload(server)
+        try:
+            assert reloaded.PAINT_IDLE_SECONDS == 42
+        finally:
+            monkeypatch.delenv("VISION3D_PAINT_IDLE_SECONDS", raising=False)
+            importlib.reload(server)
