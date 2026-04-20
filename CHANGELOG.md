@@ -11,6 +11,12 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+### Changed
+- `.concepts.yml` — `strict: false → true`. The pre-commit hook now blocks
+  commits on any unresolved invariant drift instead of only reporting it.
+  Ecosystem-wide flip on 2026-04-20 (Chat 46), unblocked by the
+  `changelog_tag_sync` release-in-progress tolerance.
+
 ### Added
 - `scripts/cut-release.sh` — ecosystem-shared release orchestrator. Validates
   clean tree + semver arg + non-empty `[Unreleased]`, edits CHANGELOG +

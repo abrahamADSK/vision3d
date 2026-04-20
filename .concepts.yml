@@ -6,12 +6,12 @@
 # over from Chat 31–34 (no FlashVDM, no PAINT_MAX_FACES, no attention_slicing).
 #
 # All invariants pass against HEAD (Chat 44 audit: "no critical drifts").
-# Soft-launch is active anyway for two weeks in case an invariant is itself
-# buggy; flip to `strict: true` when stable.
+# Strict mode flipped on 2026-04-20 (Chat 46), after release-flow tension
+# was resolved via changelog_tag_sync tolerance + cut-release.sh.
 
 schema_version: 1
 repo: vision3d
-strict: false
+strict: true
 
 concepts:
 
