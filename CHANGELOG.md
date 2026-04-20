@@ -11,6 +11,18 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+## [v1.6.3] — 2026-04-20
+
+### Added
+- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is now set via
+  `os.environ.setdefault()` at the top of `server.py`, before the first
+  torch import — matches the existing `PYTORCH_ENABLE_MPS_FALLBACK` pattern.
+  Complements the v1.6.2 paint-unload fix by reducing allocator
+  fragmentation so the reclaimed VRAM actually comes back as contiguous
+  free memory. `setdefault` lets operators override via the systemd
+  `Environment=` directive without code changes. Startup log prints the
+  effective value.
+
 ## [v1.6.2] — 2026-04-20
 
 ### Fixed

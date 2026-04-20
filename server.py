@@ -73,6 +73,14 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 # impact.  Must be set before the first torch import.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
+# Reduce CUDA allocator fragmentation so unloaded pipelines actually return
+# VRAM to sibling services (Ollama, ComfyUI) on the shared GPU. Paired with
+# _unload_paint_pipeline() + torch.cuda.ipc_collect() in _clear_device_cache.
+# `setdefault` means operators can still override via the systemd unit.
+# Must be set before the first torch import — the CUDA allocator is built
+# at torch.cuda initialization and ignores later env changes.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch as _torch_init
 
 if _torch_init.cuda.is_available():
@@ -1515,11 +1523,7 @@ async def lifespan(app: FastAPI):
         f"[Vision3D] Paint idle unload: check every {PAINT_IDLE_CHECK_INTERVAL}s | "
         f"unload after {PAINT_IDLE_SECONDS}s of inactivity"
     )
-    if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF"):
-        print(
-            "[Vision3D] Tip: set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
-            "in the systemd unit to reduce allocator fragmentation across reloads."
-        )
+    print(f"[Vision3D] PYTORCH_CUDA_ALLOC_CONF = {os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '(unset)')}")
     yield
     cleanup_task.cancel()  # Stop cleanup on shutdown
     paint_idle_task.cancel()
