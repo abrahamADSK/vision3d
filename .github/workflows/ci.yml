@@ -38,7 +38,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install fastapi "uvicorn[standard]" python-multipart \
                       sse-starlette httpx
-          pip install pytest pyyaml
+          pip install pytest pytest-asyncio pyyaml
 
       - name: Run tests
         run: |
