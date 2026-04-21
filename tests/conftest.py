@@ -5,7 +5,6 @@ They test the FastAPI app, helper functions, and endpoint behavior
 using mocks where needed.
 """
 
-import asyncio
 import sys
 import time
 from pathlib import Path

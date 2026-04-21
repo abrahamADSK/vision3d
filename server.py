@@ -63,7 +63,7 @@ from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Header, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 # ── Device detection ─────────────────────────────────────────────────────────
 
@@ -262,7 +262,7 @@ def _job_fail(job_id: str, error: str):
 #
 # When a job is evicted, its output_dir on disk is also deleted (if inside WORK_DIR).
 
-import shutil
+import shutil  # noqa: E402 — grouped with job-eviction constants below
 
 JOB_TTL_SECONDS = int(os.environ.get("GPU_JOB_TTL", "3600"))
 JOB_RUNNING_TTL = int(os.environ.get("GPU_JOB_RUNNING_TTL", "7200"))
@@ -378,7 +378,7 @@ def _check_max_jobs():
 
 # ── Input validation ─────────────────────────────────────────────────────────
 
-import re
+import re  # noqa: E402 — grouped with input-validation helpers below
 
 
 def _validate_output_subdir(output_subdir: str) -> str:
@@ -527,7 +527,6 @@ def _get_available_models():
 
 def _get_shape_pipeline(model_name: str = "fast" if DEVICE == "mps" else "turbo"):
     """Load shape pipeline by model name. Swaps models if a different one is requested."""
-    import torch
     global _shape_pipeline, _shape_pipeline_name
 
     if _shape_pipeline is not None and _shape_pipeline_name == model_name:
@@ -571,7 +570,6 @@ def _get_shape_pipeline(model_name: str = "fast" if DEVICE == "mps" else "turbo"
 def _unload_shape_pipeline():
     """Unload shape model from GPU to free VRAM for paint pipeline."""
     import gc
-    import torch
     global _shape_pipeline, _shape_pipeline_name
 
     if _shape_pipeline is None:
@@ -664,7 +662,7 @@ def _patch_paint_progress():
     print("[Paint] Progress markers installed (delight 10% / mvd 50% / super 80%)")
 
 
-from contextlib import contextmanager
+from contextlib import contextmanager  # noqa: E402 — grouped with the pipeline-unload helpers below
 
 
 @contextmanager
@@ -727,7 +725,6 @@ def _unload_paint_pipeline():
     ipc_collect() to actually return the VRAM to other processes.
     """
     import gc
-    import torch
     global _paint_pipeline, _paint_pipeline_last_use
 
     if _paint_pipeline is None:
@@ -773,7 +770,6 @@ def _load_t2i_pipeline():
 def _unload_t2i_pipeline():
     """Fully unload SDXL Turbo from GPU memory to free VRAM for other apps."""
     import gc
-    import torch
     global _t2i_pipeline
 
     if _t2i_pipeline is None:
@@ -800,7 +796,6 @@ def _run_shape_from_image(
     model: str = "turbo",
 ) -> dict:
     """Image → 3D shape generation (blocking, runs in thread)."""
-    import torch
     from PIL import Image
     import numpy as np
 
@@ -878,7 +873,6 @@ def _run_shape_from_text(
     4. Decimation (if target_faces > 0)
     5. Paint pipeline textures the mesh using the reference image
     """
-    import torch
     from PIL import Image
     import numpy as np
     import trimesh
@@ -897,7 +891,7 @@ def _run_shape_from_text(
         "no shadow, white background, studio lighting, photorealistic, "
         "clean lines, product photography"
     )
-    _job_log(job_id, f"[2/8] Generating reference image...")
+    _job_log(job_id, "[2/8] Generating reference image...")
     _job_log(job_id, f"      Prompt: '{text_prompt}'")
     _job_log(job_id, f"      Enhanced: '{enhanced_prompt}'")
     _job_progress(job_id, "t2i", 0.0, "step 0/4")
@@ -1188,7 +1182,7 @@ def _adaptive_decimate(mesh, target_faces: int, job_id: str):
 
     if n_protected >= target_faces:
         # More protected faces than target — just do gentle uniform decimation
-        _job_log(job_id, f"      Too many protected faces, using gentle uniform decimation")
+        _job_log(job_id, "      Too many protected faces, using gentle uniform decimation")
         return _uniform_decimate(mesh, target_faces, job_id, aggressiveness=3)
 
     # Budget: protected faces stay, reducible faces get decimated
@@ -1282,7 +1276,6 @@ def _run_texture(
     mesh_path: str, image_path: str, output_dir: str, job_id: str
 ) -> dict:
     """Texture painting (blocking, runs in thread)."""
-    import torch
     import trimesh
     from PIL import Image
 
@@ -1301,7 +1294,7 @@ def _run_texture(
     if isinstance(mesh, trimesh.Scene):
         mesh = mesh.dump(concatenate=True)
 
-    _job_log(job_id, f"[3/4] Texturing with image (~2-5 min)...")
+    _job_log(job_id, "[3/4] Texturing with image (~2-5 min)...")
     image = Image.open(image_path)
     with _paint_progress_scope(job_id):
         textured = pipeline(mesh, image)
@@ -1355,7 +1348,6 @@ def _run_full_pipeline(
     model: str = "turbo",
 ) -> dict:
     """Full pipeline: image → shape → decimate → texture (blocking, runs in thread)."""
-    import torch
     from PIL import Image
     import numpy as np
     import trimesh
@@ -2044,7 +2036,7 @@ async def stream_job(
         while True:
             j = _jobs.get(job_id)
             if not j:
-                yield f"event: error\ndata: Job disappeared\n\n"
+                yield "event: error\ndata: Job disappeared\n\n"
                 break
 
             # Send new log lines
@@ -2070,16 +2062,16 @@ async def stream_job(
 
             if j["status"] == "completed":
                 files_json = json.dumps(j["files"])
-                yield f"event: status\ndata: completed\n\n"
+                yield "event: status\ndata: completed\n\n"
                 yield f"event: done\ndata: {{\"status\":\"completed\",\"elapsed_s\":{elapsed},\"files\":{files_json}}}\n\n"
                 break
             elif j["status"] == "failed":
                 err = (j.get("error") or "Unknown").replace("\n", "\\n")
-                yield f"event: status\ndata: failed\n\n"
+                yield "event: status\ndata: failed\n\n"
                 yield f"event: done\ndata: {{\"status\":\"failed\",\"elapsed_s\":{elapsed},\"error\":\"{err}\"}}\n\n"
                 break
 
-            yield f"event: status\ndata: running\n\n"
+            yield "event: status\ndata: running\n\n"
             # Faster poll than before (was 2s) so progress updates feel fluid.
             await asyncio.sleep(0.5)
     return StreamingResponse(
