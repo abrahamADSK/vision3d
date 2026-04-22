@@ -11,6 +11,8 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+## [1.6.6] — 2026-04-22
+
 ### Added
 - `scripts/invariant_types.py` — `_write_subset` handler registered in
   WRITERS (Phase C + D, Chat 48). Covers two shapes:
