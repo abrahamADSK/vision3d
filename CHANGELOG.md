@@ -11,6 +11,8 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+## [1.6.5] — 2026-04-22
+
 ### Added
 - `.github/workflows/ci.yml` — GitHub Actions CI workflow. Four blocking
   jobs: pytest (3.9/3.10/3.11/3.12 matrix — glorfindel runs 3.9), ruff
