@@ -12,59 +12,75 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 ## [Unreleased]
 
 ### Added
-- `.github/workflows/ci.yml` — GitHub Actions CI workflow. Three jobs:
-  pytest (3.9/3.10/3.11/3.12 matrix — glorfindel runs 3.9, so lower bound
-  is tighter than other ecosystem repos per Chat 45 PEP 604 lesson),
-  ruff lint (non-blocking in v1), verify_concepts on every push + PR.
-  Heavy runtime deps (torch, diffusers, trimesh, etc.) are mocked via
-  `tests/conftest.py`, so CI only installs the FastAPI stack. Closes
-  Chat 45 P3 CI item.
+- `.github/workflows/ci.yml` — GitHub Actions CI workflow. Four blocking
+  jobs: pytest (3.9/3.10/3.11/3.12 matrix — glorfindel runs 3.9), ruff
+  lint, mypy, verify_concepts on every push + PR. Pytest coverage
+  reported inline via `--cov=<pkg> --cov-report=term`. Heavy runtime
+  deps (torch, diffusers, trimesh, etc.) are mocked via
+  `tests/conftest.py`, so CI only installs the FastAPI stack.
 - `.github/workflows/pr-review.yml` — automated Claude PR review
   (`anthropics/claude-code-action@v1`). Byte-identical across the 4
-  ecosystem repos. Requires repo secret `ANTHROPIC_API_KEY`. Closes
-  Chat 45 P3 PR-review item.
-
-### Fixed
-- `install.sh` — replaced two unused-counter `for i in 1..5` loops with
-  `for _ in 1..5` to silence shellcheck SC2034. Zero behaviour change
-  (ecosystem shellcheck sweep Chat 46).
-
-### Changed
-- `.concepts.yml` — `strict: false → true`. The pre-commit hook now blocks
-  commits on any unresolved invariant drift instead of only reporting it.
-  Ecosystem-wide flip on 2026-04-20 (Chat 46), unblocked by the
-  `changelog_tag_sync` release-in-progress tolerance.
-
-### Added
+  ecosystem repos; canonical at `~/Projects/pr-review-canonical.yml`.
+  Uses `claude_code_oauth_token` (Max/Pro subscription, not API key).
+  Requires the Claude Code GitHub App installed on the repo + workflow
+  permission `id-token: write` + `--model claude-sonnet-4-6` pin so the
+  OAuth token (Sonnet-scoped) works against the default-Opus action.
 - `scripts/verify_concepts.py --write` — WRITER MODE (Chat 46). Requires
   the triple flag `--accept-current-as-truth --i-reviewed-diff --write`.
   Dispatches to per-type writers in `invariant_types.py::WRITERS`.
-  Currently supports `tool_count` (updates integers inside
-  `<!-- concept:<id> start/end -->` blocks) and `review_expiry` (bumps
-  `reviewed_at` timestamps to today). Other invariant types report
-  `WRITER UNSUPPORTED`. No auto-commit — user reviews `git diff` before
-  committing. Closes Chat 45 P3.15 deferral.
-- `scripts/cut-release.sh` — ecosystem-shared release orchestrator. Validates
-  clean tree + semver arg + non-empty `[Unreleased]`, edits CHANGELOG +
-  `VERSION` (vision3d has no `pyproject.toml`; the `VERSION` file is the
-  release anchor), commits with `CUT_RELEASE_VERSION=X.Y.Z` so the
-  `changelog_tag_sync` invariant tolerates the transient pre-commit drift,
-  then tags, pushes, and creates a GitHub release with the CHANGELOG
-  section as notes. Ships with `--dry-run` for safe previews. Byte-identical
-  across the 4 MCP-ecosystem repos; canonical at
-  `~/Projects/cut-release-canonical.sh`. Resolves the Chat 45 P1 release-flow
-  tension that was blocking the ecosystem-wide `strict: true` flip.
+  Currently supports `tool_count` and `review_expiry`; other types
+  report `WRITER UNSUPPORTED`. No auto-commit.
+- `scripts/cut-release.sh` — ecosystem-shared release orchestrator.
+  Validates clean tree + semver arg + non-empty `[Unreleased]`, edits
+  CHANGELOG + `VERSION` (vision3d has no `pyproject.toml`; the
+  `VERSION` file is the release anchor), commits with
+  `CUT_RELEASE_VERSION=X.Y.Z` so the `changelog_tag_sync` invariant
+  tolerates the transient pre-commit drift, tags, pushes, and creates
+  a GitHub release. Byte-identical across the 4 MCP-ecosystem repos.
 - `VERSION` — plain-text version anchor (`1.6.4`) read by
   `scripts/verify_concepts.py` and bumped by `scripts/cut-release.sh`.
-  vision3d has no `pyproject.toml`, so a dedicated anchor file is the
-  simplest way to make the `changelog_tag_sync` tolerance work. Content is
-  a single line of `X.Y.Z`.
-- `scripts/invariant_types.py` — new `changelog_tag_sync` handler replaces
-  the previous `subset`-based `changelog_tag_coherence` invariant. Adds
-  release-in-progress tolerance anchored to env `CUT_RELEASE_VERSION` (set
-  by `cut-release.sh` at commit time) OR the `VERSION` file content. The
-  tolerance only fires for exactly one drifting version that matches the
-  anchor — cannot be forged without bumping the real anchor.
+- `scripts/invariant_types.py` — new `changelog_tag_sync` handler
+  replaces the previous `subset`-based `changelog_tag_coherence`.
+  Release-in-progress tolerance anchored to env `CUT_RELEASE_VERSION`
+  OR the `VERSION` file content.
+- `scripts/invariant_types.py` — `ast_dict_keys` canonical (Chat 47)
+  now reads `ast.AnnAssign` in addition to `ast.Assign`, so typed-dict
+  declarations resolve correctly. Synced byte-identical across 4 repos.
+- `scripts/invariant_types.py` — `version_match` canonical (Chat 48)
+  honors opt-in `tolerate_release_in_progress: true`. When set, a
+  drift of the form `a == CUT_RELEASE_VERSION != b` is tolerated so
+  `cut-release.sh` can commit a version bump before the matching git
+  tag exists, without weakening strict-mode guarantees for non-release
+  commits.
+- `scripts/verify_concepts.py` — `ci_skip: true` flag on individual
+  invariants + auto-skip of `review_expiry` under `GITHUB_ACTIONS`
+  (Chat 47). Keeps dev-side invariants active via pre-commit while CI
+  runs stay green without shipping `~/Projects/.external_versions.yml`
+  or broad `gh` auth.
+
+### Changed
+- `.concepts.yml` — `strict: false → true`. The pre-commit hook now
+  blocks commits on any unresolved invariant drift instead of only
+  reporting it. Ecosystem-wide flip on 2026-04-20 (Chat 46), unblocked
+  by the `changelog_tag_sync` release-in-progress tolerance.
+- CI pipeline cleanup (Chat 47): ruff baseline cleared (all warnings
+  fixed, job flipped to blocking), mypy job flipped to blocking (baseline
+  already clean). Both jobs now block merge rather than
+  `continue-on-error: true`.
+
+### Fixed
+- `install.sh` — replaced two unused-counter `for i in 1..5` loops with
+  `for _ in 1..5` to silence shellcheck SC2034 (Chat 46).
+- `.github/workflows/ci.yml` — install `pytest-asyncio` so the two
+  async-decorated tests actually run (Chat 47).
+- `.github/workflows/pr-review.yml` — added `id-token: write` workflow
+  permission (Chat 48). Without it the action errored with "Unable to
+  get ACTIONS_ID_TOKEN_REQUEST_URL env variable" in 3 retries.
+- `.github/workflows/pr-review.yml` — pinned `--model claude-sonnet-4-6`
+  via `claude_args` (Chat 48). OAuth tokens from `claude setup-token`
+  are scoped to Sonnet on Max/Pro; the action's default model (Opus
+  after v1.0.100) returned `401 Invalid bearer token` against those
+  credentials (see anthropics/claude-code-action#584).
 
 ## [v1.6.4] — 2026-04-20
 
