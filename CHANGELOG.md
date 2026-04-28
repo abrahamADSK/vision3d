@@ -11,6 +11,30 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+### Fixed
+- `server.py` — Mac (MPS) jobs no longer crash on `ConsistencyFlowMatchEulerDiscreteScheduler`
+  attribute lookup when the caller (web UI Medium preset, MCP, explicit
+  `model=turbo`) requested the turbo variant. Three changes:
+  - New `_default_shape_model()` helper centralises the device-aware
+    default (`fast` on MPS, `turbo` elsewhere). Replaces the old default
+    expression duplicated in `_get_shape_pipeline`, `_run_shape_from_image`,
+    `_run_shape_from_text`, `_run_full_pipeline`, and `_resolve_preset`.
+  - Hard reject in `_get_shape_pipeline`: when `DEVICE == "mps"` and the
+    resolved model is `turbo`, raise `RuntimeError` with the available
+    alternatives instead of silently downloading the missing variant from
+    HuggingFace Hub and crashing on scheduler import. Job fails fast (~1 s)
+    with a clear message instead of waiting ~18 s for the failed download.
+  - `QUALITY_PRESETS` is patched post-construction on MPS so the `low` and
+    `medium` presets resolve to `fast` (and their labels reflect that).
+    The dict keys are unchanged — `preset_names_match_contract` invariant
+    stays green.
+
+  Why: the hunyuan3d-mac fork is several commits behind upstream Tencent
+  and lacks the consistency scheduler that turbo requires. Backporting the
+  scheduler is a separate, larger project (PASSIVE — needs validation per
+  `feedback_flashvdm_distrust.md` protocol). Until then, Mac users get
+  `fast` automatically and explicit turbo requests get a useful error.
+
 ## [1.6.6] — 2026-04-22
 
 ### Added

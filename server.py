@@ -513,6 +513,13 @@ SHAPE_MODELS = {
 }
 
 
+def _default_shape_model() -> str:
+    # The hunyuan3d-mac fork is several commits behind upstream Tencent and lacks
+    # ConsistencyFlowMatchEulerDiscreteScheduler, which the turbo variant requires.
+    # On MPS, default to "fast" (uses FlowMatchEulerDiscreteScheduler, which is present).
+    return "fast" if DEVICE == "mps" else "turbo"
+
+
 def _get_available_models():
     """Return list of model names that have weights on disk."""
     available = []
@@ -525,18 +532,31 @@ def _get_available_models():
     return available
 
 
-def _get_shape_pipeline(model_name: str = "fast" if DEVICE == "mps" else "turbo"):
+def _get_shape_pipeline(model_name: Optional[str] = None):
     """Load shape pipeline by model name. Swaps models if a different one is requested."""
     global _shape_pipeline, _shape_pipeline_name
+
+    if model_name is None or model_name == "":
+        model_name = _default_shape_model()
+
+    if DEVICE == "mps" and model_name == "turbo":
+        raise RuntimeError(
+            "turbo_unavailable_on_mps: the turbo variant requires "
+            "ConsistencyFlowMatchEulerDiscreteScheduler which is missing from "
+            "the hunyuan3d-mac fork. Use model='fast' (or 'full') on this Mac, "
+            "or run vision3d in proxy mode (--remote <cuda-host>) to delegate "
+            "to a CUDA box that has the turbo weights and scheduler."
+        )
 
     if _shape_pipeline is not None and _shape_pipeline_name == model_name:
         return _shape_pipeline
 
     subfolder = SHAPE_MODELS.get(model_name)
     if not subfolder:
-        print(f"[Shape] Unknown model '{model_name}', falling back to turbo")
-        model_name = "turbo"
-        subfolder = SHAPE_MODELS["turbo"]
+        fallback = _default_shape_model()
+        print(f"[Shape] Unknown model '{model_name}', falling back to '{fallback}'")
+        model_name = fallback
+        subfolder = SHAPE_MODELS[fallback]
 
     # Unload current model if switching
     if _shape_pipeline is not None:
@@ -793,7 +813,7 @@ def _run_shape_from_image(
     target_faces: int = 0,
     octree_resolution: int = 384,
     num_inference_steps: int = 30,
-    model: str = "turbo",
+    model: Optional[str] = None,
 ) -> dict:
     """Image → 3D shape generation (blocking, runs in thread)."""
     from PIL import Image
@@ -802,6 +822,8 @@ def _run_shape_from_image(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
+    if not model:
+        model = _default_shape_model()
     _job_log(job_id, f"[1/5] Loading shape pipeline ({model})...")
     pipeline = _get_shape_pipeline(model)
 
@@ -862,7 +884,7 @@ def _run_shape_from_text(
     target_faces: int = 0,
     octree_resolution: int = 384,
     num_inference_steps: int = 30,
-    model: str = "turbo",
+    model: Optional[str] = None,
 ) -> dict:
     """Text → image → 3D shape → texture (blocking, runs in thread).
 
@@ -938,6 +960,8 @@ def _run_shape_from_text(
             _job_log(job_id, "      WARNING: rembg not available, using raw image")
 
     # ── Phase 1: Image → 3D shape ────────────────────────────────────
+    if not model:
+        model = _default_shape_model()
     _job_log(job_id, "═══ PHASE 2/3: SHAPE GENERATION ═══")
     _job_log(job_id, f"[3/8] Loading shape pipeline ({model})...")
     pipeline = _get_shape_pipeline(model)
@@ -1065,6 +1089,16 @@ QUALITY_PRESETS = {
     },
 }
 
+# Device-aware adjustment: rewrite turbo→fast on MPS so the low/medium presets
+# actually work on Mac (the hunyuan3d-mac fork lacks the turbo scheduler).
+# Keys/structure are preserved so the preset_names_match_contract invariant
+# stays green; only the model field and label are adjusted.
+if DEVICE == "mps":
+    for _name, _cfg in QUALITY_PRESETS.items():
+        if _cfg.get("model") == "turbo":
+            _cfg["model"] = "fast"
+            _cfg["label"] = _cfg["label"].replace("turbo", "fast")
+
 
 def _resolve_preset(target_faces: int, preset: str, model: str = "",
                     octree_resolution: int = 0, num_inference_steps: int = 0) -> dict:
@@ -1086,7 +1120,7 @@ def _resolve_preset(target_faces: int, preset: str, model: str = "",
         "target_faces": target_faces,
         "octree_resolution": octree_resolution or 384,
         "num_inference_steps": num_inference_steps or 30,
-        "model": model or "turbo",
+        "model": model or _default_shape_model(),
     }
 
 
@@ -1345,7 +1379,7 @@ def _run_full_pipeline(
     target_faces: int = 50000,
     octree_resolution: int = 384,
     num_inference_steps: int = 30,
-    model: str = "turbo",
+    model: Optional[str] = None,
 ) -> dict:
     """Full pipeline: image → shape → decimate → texture (blocking, runs in thread)."""
     from PIL import Image
@@ -1356,6 +1390,8 @@ def _run_full_pipeline(
     output.mkdir(parents=True, exist_ok=True)
 
     # ── Phase 1: Shape generation ──────────────────────────────────
+    if not model:
+        model = _default_shape_model()
     _job_log(job_id, "═══ PHASE 1/2: SHAPE GENERATION ═══")
     _job_log(job_id, f"[1/6] Loading shape pipeline ({model})...")
     pipeline = _get_shape_pipeline(model)
