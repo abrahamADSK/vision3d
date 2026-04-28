@@ -11,6 +11,8 @@ Each release is also tagged in git and published as a [GitHub Release](https://g
 
 ## [Unreleased]
 
+## [1.6.7] — 2026-04-28
+
 ### Fixed
 - `server.py` — Mac (MPS) jobs no longer crash on `ConsistencyFlowMatchEulerDiscreteScheduler`
   attribute lookup when the caller (web UI Medium preset, MCP, explicit
